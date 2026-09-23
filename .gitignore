@@ -1,0 +1,13 @@
+target/
+*.class
+.idea/
+*.iml
+.vscode/
+.DS_Store
+logs/
+*.log
+*.pid
+
+# Local runtime data
+deploy/rocketmq/data/
+deploy/local/pids/

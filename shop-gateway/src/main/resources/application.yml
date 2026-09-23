@@ -1,0 +1,164 @@
+server:
+  # 默认 8080；宿主形态若 8080 被本机其他进程占用，可用 SHOP_GATEWAY_PORT 避让（K8s 形态由 Service 80 固定）
+  port: ${SHOP_GATEWAY_PORT:8080}
+  shutdown: graceful
+
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s  # 优雅停机：在途请求/MQ 消费/事务最长等待
+  application:
+    name: shop-gateway
+  # C14/R-B3：限流令牌桶 Redis（复用中间件同一实例；网关不读业务缓存，仅作桶存储）。
+  # 故障策略：ShopRedisRateLimiter 默认 fail-closed（shop.gateway.ratelimit.redis-fail-open=false）。
+  # connect/command 超时收紧到 1s：Redis 宕机时限流判定必须快速拒绝，不允许请求堆积等 Redis。
+  data:
+    redis:
+      host: ${SHOP_REDIS_HOST:localhost}
+      port: ${SHOP_REDIS_PORT:6379}
+      password: ${SHOP_REDIS_PASSWORD:}
+      connect-timeout: 1s
+      timeout: 1s
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+        namespace: public
+    # 关闭 Spring Cloud LoadBalancer 自带重试，避免与网关 Retry 过滤器叠加成双重重试（C14）
+    loadbalancer:
+      retry:
+        enabled: false
+    gateway:
+      discovery:
+        locator:
+          enabled: false
+      # C14：下游 TCP 建连 2s 超时（PERF §3 对死亡实例的 Connect refused 窗口由它上界化）；
+      # 整体响应 5s 超时（慢下游 504，由 ShopGatewayExceptionHandler 统一包裹 code=10010）。
+      httpclient:
+        connect-timeout: 2000
+        response-timeout: 5s
+      # 全局默认过滤器（所有路由生效，顺序即外层到内层）：
+      #   1) ShopRequestRateLimiter：官方判定模型 + shopRedisRateLimiter（自定义三维度/键前缀/
+      #      fail-closed），deny 直写 429+10007 统一包裹体（官方空体 429 客户端无法按契约解析）；
+      #   2) Retry：仅 GET，且仅 502/503 或 Connect refused 重试 1 次；POST/PUT/DELETE 零重试。
+      default-filters:
+        - name: ShopRequestRateLimiter
+          args:
+            keyResolver: "#{@shopKeyResolver}"
+            rateLimiter: "#{@shopRedisRateLimiter}"
+            statusCode: TOO_MANY_REQUESTS
+        - name: Retry
+          args:
+            retries: 1
+            methods: GET
+            statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+            # Retry 默认 series=SERVER_ERROR 会把 500/504 也纳入重试；需求只允许 502/503。
+            # 1xx 在代理响应中不可能出现，用 INFORMATIONAL 作「永不命中」哨兵关掉 series 维度，
+            # 重试只由上面的 statuses + exceptions 决定。
+            series: INFORMATIONAL
+            exceptions:
+              - java.net.ConnectException
+              # reactor-netty 把 "Connection refused" 包成 AnnotatedConnectException（cause 才是
+              # java.net.ConnectException），仅列 JDK 类会漏判，故两者都显式声明。
+              - io.netty.channel.AbstractChannel$AnnotatedConnectException
+      routes:
+        - id: shop-user
+          uri: lb://shop-user-service
+          predicates:
+            - Path=/api/user/**
+          filters:
+            - StripPrefix=2
+        - id: shop-product
+          uri: lb://shop-product-service
+          predicates:
+            - Path=/api/product/**
+          filters:
+            - StripPrefix=2
+        - id: shop-marketing
+          uri: lb://shop-marketing-service
+          predicates:
+            - Path=/api/marketing/**
+          filters:
+            - StripPrefix=2
+        - id: shop-order
+          uri: lb://shop-order-service
+          predicates:
+            - Path=/api/order/**
+          filters:
+            - StripPrefix=2
+        - id: shop-pay
+          uri: lb://shop-pay-service
+          predicates:
+            - Path=/api/pay/**
+          filters:
+            - StripPrefix=2
+        - id: shop-settlement
+          uri: lb://shop-settlement-service
+          predicates:
+            - Path=/api/settlement/**
+          filters:
+            - StripPrefix=2
+        - id: shop-aftersale
+          uri: lb://shop-aftersale-service
+          predicates:
+            - Path=/api/aftersale/**
+          filters:
+            - StripPrefix=2
+
+shop:
+  # C19：环境标识，限流键前缀 rl:{env}:{routeId}:{principal}；prod 必须由 env 注入
+  env: ${SHOP_ENV:local}
+  jwt:
+    secret: ${SHOP_JWT_SECRET:dev-local-only-jwt-secret-key-0123456789abcdef}
+  gateway:
+    ratelimit:
+      enabled: true
+      # R-B4 矩阵第 1 行：网关桶 Redis 故障必须 fail-closed deny；生产不允许置 true
+      redis-fail-open: false
+      global:
+        # 初始值，prod 按容量压测后由 ConfigMap 覆盖
+        replenish-rate: 100
+        burst-capacity: 200
+        requested-tokens: 1
+      routes:
+        # PERF_REPORT §3：order 写链路拐点 20 TPS，初始 20/40；pay/marketing-seckill
+        # 如需更低桶在此按 routes.<routeId>.* 追加，key 为网关路由 id（shop-order 等）。
+        shop-order:
+          replenish-rate: 20
+          burst-capacity: 40
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  # O1/C53：OTel bridge 采样率（仅日志关联，默认 100%，环境变量可覆盖）
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  metrics:
+    tags:
+      # O7/C55：全部指标带 application 公共标签
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        # O7：导出 Prometheus 原生 bucket，p95/p99 面板有数据
+        http.server.requests: true
+      maximum-expected-value:
+        http.server.requests: 5s
+
+---
+# 生产环境（--spring.profiles.active=prod）：关闭在线 API 文档，避免接口结构外泄（M-4）；
+# JWT 密钥/服务间令牌必须环境注入，使用内置默认值将 fail-fast（H-3/C-1）。
+spring:
+  config:
+    activate:
+      on-profile: prod
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

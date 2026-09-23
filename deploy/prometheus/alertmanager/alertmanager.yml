@@ -1,0 +1,52 @@
+# Alertmanager 配置（W6-2 / O2 通道占位）
+#
+# 环境残留声明：
+#   仓库只交付占位配置。缺省 receiver 为 log-only（告警仅写 Alertmanager stdout，
+#   可在 docker logs / Prometheus UI 的 Alerts 页面看到），不依赖任何外部通道。
+#   真实钉钉/飞书/电话等通知通道为【部署环境提供方职责】，真实 webhook 与密钥禁止入库。
+#
+# 启用真实 webhook（由部署环境执行，不在本仓库完成）：
+#   1) 用 envsubst/配置管理把下方注释模板中的 $ALERT_WEBHOOK_URL 渲染为真实地址，例如：
+#        ALERT_WEBHOOK_URL='https://oapi.dingding.com/robot/send?access_token=xxx' \
+#        envsubst < alertmanager.yml > alertmanager.rendered.yml
+#      （Alertmanager 自身不做环境变量展开，必须在容器外渲染或经 webhook-adapter 注入。）
+#   2) 取消 webhook-dingtalk receiver 与 route 子路由的注释；
+#   3) 未设置 ALERT_WEBHOOK_URL 时保持 log-only 降级，不要把占位地址写入真实配置。
+#
+# amtool 校验：amtool check-config alertmanager.yml
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: log-only
+  group_by: ['alertname', 'application', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  # 真实通道启用后示例（分级路由，保持注释占位）：
+  # routes:
+  #   - receiver: webhook-dingtalk
+  #     matchers:
+  #       - severity =~ "P1|P2"
+  #     continue: true
+
+receivers:
+  # 缺省：仅 stdout。Alertmanager 无内置 no-op receiver，
+  # 不配置任何 *_configs 时收到的通知只记录于自身日志，即“log-only”。
+  - name: log-only
+
+  # - name: webhook-dingtalk
+  #   webhook_configs:
+  #     # 钉钉/飞书机器人的真实地址由 $ALERT_WEBHOOK_URL 在部署时渲染（见文件头说明）
+  #     - url: '${ALERT_WEBHOOK_URL}'
+  #       send_resolved: true
+  #       max_alerts: 0
+
+inhibit_rules:
+  # JVM 堆 P1 触发时抑制同服务的 P2 堆预警，避免重复打扰
+  - source_matchers:
+      - severity = "P1"
+    target_matchers:
+      - severity = "P2"
+    equal: ['alertname', 'application']

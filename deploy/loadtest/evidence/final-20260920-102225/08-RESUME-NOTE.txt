@@ -1,0 +1,15 @@
+KIND_DEPLOY 阶段链中断/恢复说明（2026-09-20 10:39）
+
+- 首跑链（十二门同一证据目录 final-20260920-102225）：UNIT/PACKAGE/MIDDLEWARE/
+  HOSTAPPS/E2E/CHAOS/KIND_IMAGE 全绿，E2E 59 例 Failures=0/Errors=0/Skipped=4，
+  CHAOS PASS=30 FAIL=0；KIND_DEPLOY 的全部 kubectl apply 已执行完毕
+  （08-kind-deploy.log 完整），脚本进入单节点 rollout status 观测循环时，
+  后台链进程被 macOS 因整机内存不足 kill（task b25evwjme: "stopped because the
+  system is running low on memory"）——属宿主机资源回收，非任何验收门失败。
+- 中断点前的部署事实：8 Deployment 均已按生产清单 + kind 覆盖层应用，
+  ConfigMap ROCKETMQ_ENDPOINTS 已按当前 LAN IP patch；单节点第 2 副本 Pending
+  （硬反亲和）属预期，由 HA 阶段 ha-check.sh live-cap 收敛。
+- 恢复方式：final-acceptance.sh 增加 EVIDENCE_DIR 环境变量（可复用证据目录），
+  以 ONLY_STAGES="HA,K6_SEED,K6_SMOKE,K6_OVERSELL" 在本目录续跑，
+  全部证据仍出自同一套最终源码 → jar（02-package.log）→ 镜像（07-kind-image.log）。
+- 08-pods.txt 为恢复时刻由总控按脚本末尾等价命令补采（kubectl get pods）。

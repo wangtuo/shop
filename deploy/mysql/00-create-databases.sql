@@ -1,0 +1,8 @@
+-- 七个服务独立 schema，服务间不允许跨库 JOIN，跨域只走 Feign/MQ
+CREATE DATABASE IF NOT EXISTS shop_user        DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS shop_product     DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS shop_marketing   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS shop_order       DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS shop_pay         DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS shop_settlement  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS shop_aftersale   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

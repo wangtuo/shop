@@ -1,0 +1,18 @@
+NAME                                       READY   STATUS             RESTARTS        AGE
+shop-aftersale-service-d869c86d7-tgkl4     0/1     CrashLoopBackOff   4 (36s ago)     10m
+shop-aftersale-service-d869c86d7-tkfw8     0/1     Pending            0               10m
+shop-gateway-68cb865586-7wp2d              0/1     CrashLoopBackOff   6 (4m23s ago)   10m
+shop-gateway-68cb865586-tfss8              0/1     Pending            0               10m
+shop-gateway-69d956dd4b-p2pzh              0/1     Pending            0               2m35s
+shop-marketing-service-55df797984-g8l89    0/1     Pending            0               10m
+shop-marketing-service-55df797984-p5hxd    0/1     CrashLoopBackOff   4 (61s ago)     10m
+shop-order-service-54d4bb9d46-7lfx5        0/1     Pending            0               10m
+shop-order-service-54d4bb9d46-q8fzs        0/1     CrashLoopBackOff   4 (52s ago)     10m
+shop-pay-service-687687df4c-49r5v          0/1     CrashLoopBackOff   4 (50s ago)     10m
+shop-pay-service-687687df4c-lbq6d          0/1     Pending            0               10m
+shop-product-service-5f5cf7dbff-djpz2      0/1     CrashLoopBackOff   4 (70s ago)     10m
+shop-product-service-5f5cf7dbff-pwv58      0/1     Pending            0               10m
+shop-settlement-service-5fd7c9cfb7-lfgpm   0/1     Pending            0               10m
+shop-settlement-service-5fd7c9cfb7-rlqd7   0/1     CrashLoopBackOff   4 (42s ago)     10m
+shop-user-service-67dbcbfdfd-hxpqd         0/1     CrashLoopBackOff   4 (74s ago)     10m
+shop-user-service-67dbcbfdfd-k2scd         0/1     Pending            0               10m

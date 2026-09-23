@@ -1,0 +1,1192 @@
+# 七个业务服务的生产工作负载（模板化生成）。
+# 高可用基线：
+#   - 2 副本起步（order/pay/product 高峰 HPA 到 6）
+#   - requiredDuringScheduling 跨节点硬反亲和 + topologySpread 跨可用区尽力打散
+#   - PDB minAvailable=1 保证驱逐/滚动期间至少 1 副本
+#   - preStop 10s + JVM graceful 30s + terminationGracePeriodSeconds 60s 优雅停机
+#   - startupProbe 覆盖慢启动，readiness 摘流、liveness 自愈
+# 中间件连接信息从 shop-infra-config（ConfigMap）/ shop-infra-secret（Secret）注入；
+# Secret 不随本文件下发，见 15-secret-template.yaml 与 create-secrets.sh（禁止占位符批量覆盖）。
+#
+# R-K8S / W1-C 残留说明（文件边界约束，清单见 ACCEPTANCE.md「W1-C 残留项」）：
+#   - 网关容器的 imagePullPolicy/securityContext 在 00-namespace-config.yaml（W1-D 领地，不可改）；
+#     网关 PDB/Service 已在该文件，本波只补网关 HPA（见文末）。
+#   - broker autoCreateTopic：deploy/rocketmq/broker.conf.tpl 现硬编码 autoCreateTopic=true，
+#     生产应在 broker Deployment 侧环境变量化（如 RMQ_AUTO_CREATE_TOPIC=false，主题预先创建）；
+#     broker 模板不在本波可改目录，此处仅部署侧引用注释，交 W7 后总控跟进。
+#   - JVM 百分比在共享镜像 deploy/docker/Dockerfile（JAVA_OPTS InitialRAMPercentage=40 /
+#     MaxRAMPercentage=60）：request 768Mi 下 Max≈1.2Gi 堆、非堆余量≈0.8Gi；日后调整
+#     memory request 必须同步复算该百分比（Dockerfile 不在本波目录，残留记录）。
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-user-service
+  namespace: shop
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  minReadySeconds: 15
+  selector:
+    matchLabels: { app: shop-user-service }
+  template:
+    metadata:
+      labels: { app: shop-user-service }
+    spec:
+      # R-K8S 硬化：非 root（镜像内 USER 10001:10001）、非零 fsGroup、seccomp RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # 只读根文件系统的可写出口：/tmp、heapdump 目录、/app/logs（Nacos/RocketMQ 客户端
+      # 默认向 user.home/logs 落文件）。W7 需逐服务 smoke 确认无其他相对路径写文件点（§B-5 残留）。
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: heapdump, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
+      # 优雅停机窗口：preStop 10s（等 Endpoint/Ingress/Nacos 端点传播）+ JVM graceful 30s，60s 封顶
+      terminationGracePeriodSeconds: 60
+      # 生产硬反亲和：同一服务副本必须分布在不同节点（单节点 kind 验收由 ha-check 打补丁放宽）
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: shop-user-service }
+              topologyKey: kubernetes.io/hostname
+      # 主机维度硬性打散；可用区维度尽量打散（单可用区集群降级为尽力而为，不阻塞调度）
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: shop-user-service }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: shop-user-service }
+      containers:
+        - name: app
+          image: registry.example.com/shop/shop-user-service:2.0.0
+          imagePullPolicy: IfNotPresent
+          # R-K8S 硬化：禁提权、drop ALL capabilities、只读根文件系统
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: heapdump, mountPath: /tmp/heapdump }
+            - { name: logs, mountPath: /app/logs }
+          ports:
+            - containerPort: 8081
+          lifecycle:
+            preStop:
+              exec:
+                # SIGTERM 前先睡：让 kube-proxy iptables / ingress / Nacos 先摘流量，
+                # 随后 JVM 以 1 号进程收到 SIGTERM 走 graceful shutdown（见 Dockerfile exec）
+                command: ["sh", "-c", "sleep 10"]
+          env:
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_ADDR } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_NAMESPACE, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_NS } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_GROUP, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_GROUP } } }
+            - { name: SPRING_CLOUD_SENTINEL_TRANSPORT_DASHBOARD, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: SENTINEL_DASHBOARD } } }
+            # §A(R-K8S) useSSL 占位：dev/kind=false；托管 MySQL 地址与 TLS 落地后由 W1-D 在
+            # shop-infra-config 注入 SHOP_DB_USE_SSL=true（同步评估 Redis/RMQ/Nacos TLS 占位键）
+            # R4-22：caching_sha2_password 在 MySQL 重启后丢失内存快认证缓存，首次连接必须走
+            # RSA 全量认证；useSSL=false 时缺 allowPublicKeyRetrieval=true 会直接抛
+            # 「Public Key Retrieval is not allowed」，7 服务在 MySQL/托管数据库重启后全部
+            # CrashLoopBackOff（W7 Docker VM 被内存回收、MySQL 随之重启实证）。生产 useSSL=true
+            # 走 TLS 时该参数无副作用。
+            - { name: SHOP_DB_USE_SSL, value: "false" }
+            - { name: SPRING_DATASOURCE_URL, value: "jdbc:mysql://$(MYSQL_HOST)/shop_user?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=$(SHOP_DB_USE_SSL)&allowPublicKeyRetrieval=true" }
+            - { name: SPRING_DATA_REDIS_HOST, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: REDIS_HOST } } }
+            - { name: SHOP_MQ_ENDPOINTS, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: ROCKETMQ_ENDPOINTS } } }
+            - { name: SPRING_DATASOURCE_USERNAME, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-username } } }
+            - { name: SPRING_DATASOURCE_PASSWORD, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-password } } }
+            - { name: SHOP_JWT_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: jwt-secret } } }
+            - { name: SHOP_INTERNAL_TOKEN, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: internal-token } } }
+            - { name: SHOP_DATA_ENC_KEY, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: data-enc-key } } }
+            # 首个平台账号引导令牌：生产 Secret 中留空即功能关闭；仅本地/验收集群显式注入
+            - { name: SHOP_ADMIN_BOOTSTRAP_TOKEN, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: admin-bootstrap-token, optional: true } } }
+            - { name: SPRING_PROFILES_ACTIVE, value: "prod" }
+          envFrom:
+            - configMapRef: { name: shop-infra-config }
+          # startupProbe 承担慢启动（最多 24*5s=120s，覆盖 MQ 消费者收敛）；
+          # 通过前 liveness/readiness 不参与判定，避免启动期误杀
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8081 }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8081 }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8081 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "500m", memory: 768Mi }
+            # JVM MaxRAMPercentage=60%（约 1.2Gi 堆）+ Metaspace/直接内存/栈，RSS 留足余量
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shop-user-service-pdb
+  namespace: shop
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: shop-user-service }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shop-user-service-hpa
+  namespace: shop
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shop-user-service
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+      # 内存阈值 85%（相对 request=768Mi，触发线≈653Mi）：kind 单节点实测稳态 RSS
+      # ≈500-580Mi（=request 的 61-74%），原 70% 阈值在无流量时也恒触发扩容，曾把
+      # 单节点内存请求推到 99% 导致 surge Pod 全部 Pending、滚动发布死锁。触发线
+      # 653Mi 仅为 2Gi limit 的 32%，距 OOMKill 仍有 1.35Gi 余量；流量扩容由 CPU 65% 兜底
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 85 }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-product-service
+  namespace: shop
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  minReadySeconds: 15
+  selector:
+    matchLabels: { app: shop-product-service }
+  template:
+    metadata:
+      labels: { app: shop-product-service }
+    spec:
+      # R-K8S 硬化：非 root（镜像内 USER 10001:10001）、非零 fsGroup、seccomp RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # 只读根文件系统的可写出口：/tmp、heapdump 目录、/app/logs（Nacos/RocketMQ 客户端
+      # 默认向 user.home/logs 落文件）。W7 需逐服务 smoke 确认无其他相对路径写文件点（§B-5 残留）。
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: heapdump, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
+      # 优雅停机窗口：preStop 10s（等 Endpoint/Ingress/Nacos 端点传播）+ JVM graceful 30s，60s 封顶
+      terminationGracePeriodSeconds: 60
+      # 生产硬反亲和：同一服务副本必须分布在不同节点（单节点 kind 验收由 ha-check 打补丁放宽）
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: shop-product-service }
+              topologyKey: kubernetes.io/hostname
+      # 主机维度硬性打散；可用区维度尽量打散（单可用区集群降级为尽力而为，不阻塞调度）
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: shop-product-service }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: shop-product-service }
+      containers:
+        - name: app
+          image: registry.example.com/shop/shop-product-service:2.0.0
+          imagePullPolicy: IfNotPresent
+          # R-K8S 硬化：禁提权、drop ALL capabilities、只读根文件系统
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: heapdump, mountPath: /tmp/heapdump }
+            - { name: logs, mountPath: /app/logs }
+          ports:
+            - containerPort: 8082
+          lifecycle:
+            preStop:
+              exec:
+                # SIGTERM 前先睡：让 kube-proxy iptables / ingress / Nacos 先摘流量，
+                # 随后 JVM 以 1 号进程收到 SIGTERM 走 graceful shutdown（见 Dockerfile exec）
+                command: ["sh", "-c", "sleep 10"]
+          env:
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_ADDR } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_NAMESPACE, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_NS } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_GROUP, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_GROUP } } }
+            - { name: SPRING_CLOUD_SENTINEL_TRANSPORT_DASHBOARD, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: SENTINEL_DASHBOARD } } }
+            # §A(R-K8S) useSSL 占位：dev/kind=false；托管 MySQL 地址与 TLS 落地后由 W1-D 在
+            # shop-infra-config 注入 SHOP_DB_USE_SSL=true（同步评估 Redis/RMQ/Nacos TLS 占位键）
+            - { name: SHOP_DB_USE_SSL, value: "false" }
+            - { name: SPRING_DATASOURCE_URL, value: "jdbc:mysql://$(MYSQL_HOST)/shop_product?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=$(SHOP_DB_USE_SSL)&allowPublicKeyRetrieval=true" }
+            - { name: SPRING_DATA_REDIS_HOST, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: REDIS_HOST } } }
+            - { name: SHOP_MQ_ENDPOINTS, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: ROCKETMQ_ENDPOINTS } } }
+            - { name: SPRING_DATASOURCE_USERNAME, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-username } } }
+            - { name: SPRING_DATASOURCE_PASSWORD, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-password } } }
+            - { name: SHOP_JWT_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: jwt-secret } } }
+            - { name: SHOP_INTERNAL_TOKEN, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: internal-token } } }
+            - { name: SHOP_DATA_ENC_KEY, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: data-enc-key } } }
+            - { name: SPRING_PROFILES_ACTIVE, value: "prod" }
+          envFrom:
+            - configMapRef: { name: shop-infra-config }
+          # startupProbe 承担慢启动（最多 24*5s=120s，覆盖 MQ 消费者收敛）；
+          # 通过前 liveness/readiness 不参与判定，避免启动期误杀
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8082 }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8082 }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8082 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "500m", memory: 768Mi }
+            # JVM MaxRAMPercentage=60%（约 1.2Gi 堆）+ Metaspace/直接内存/栈，RSS 留足余量
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shop-product-service-pdb
+  namespace: shop
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: shop-product-service }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shop-product-service-hpa
+  namespace: shop
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shop-product-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+      # 内存阈值 85%（相对 request=768Mi，触发线≈653Mi）：kind 单节点实测稳态 RSS
+      # ≈500-580Mi（=request 的 61-74%），原 70% 阈值在无流量时也恒触发扩容，曾把
+      # 单节点内存请求推到 99% 导致 surge Pod 全部 Pending、滚动发布死锁。触发线
+      # 653Mi 仅为 2Gi limit 的 32%，距 OOMKill 仍有 1.35Gi 余量；流量扩容由 CPU 65% 兜底
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 85 }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-marketing-service
+  namespace: shop
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  minReadySeconds: 15
+  selector:
+    matchLabels: { app: shop-marketing-service }
+  template:
+    metadata:
+      labels: { app: shop-marketing-service }
+    spec:
+      # R-K8S 硬化：非 root（镜像内 USER 10001:10001）、非零 fsGroup、seccomp RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # 只读根文件系统的可写出口：/tmp、heapdump 目录、/app/logs（Nacos/RocketMQ 客户端
+      # 默认向 user.home/logs 落文件）。W7 需逐服务 smoke 确认无其他相对路径写文件点（§B-5 残留）。
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: heapdump, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
+      # 优雅停机窗口：preStop 10s（等 Endpoint/Ingress/Nacos 端点传播）+ JVM graceful 30s，60s 封顶
+      terminationGracePeriodSeconds: 60
+      # 生产硬反亲和：同一服务副本必须分布在不同节点（单节点 kind 验收由 ha-check 打补丁放宽）
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: shop-marketing-service }
+              topologyKey: kubernetes.io/hostname
+      # 主机维度硬性打散；可用区维度尽量打散（单可用区集群降级为尽力而为，不阻塞调度）
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: shop-marketing-service }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: shop-marketing-service }
+      containers:
+        - name: app
+          image: registry.example.com/shop/shop-marketing-service:2.0.0
+          imagePullPolicy: IfNotPresent
+          # R-K8S 硬化：禁提权、drop ALL capabilities、只读根文件系统
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: heapdump, mountPath: /tmp/heapdump }
+            - { name: logs, mountPath: /app/logs }
+          ports:
+            - containerPort: 8083
+          lifecycle:
+            preStop:
+              exec:
+                # SIGTERM 前先睡：让 kube-proxy iptables / ingress / Nacos 先摘流量，
+                # 随后 JVM 以 1 号进程收到 SIGTERM 走 graceful shutdown（见 Dockerfile exec）
+                command: ["sh", "-c", "sleep 10"]
+          env:
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_ADDR } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_NAMESPACE, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_NS } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_GROUP, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_GROUP } } }
+            - { name: SPRING_CLOUD_SENTINEL_TRANSPORT_DASHBOARD, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: SENTINEL_DASHBOARD } } }
+            # §A(R-K8S) useSSL 占位：dev/kind=false；托管 MySQL 地址与 TLS 落地后由 W1-D 在
+            # shop-infra-config 注入 SHOP_DB_USE_SSL=true（同步评估 Redis/RMQ/Nacos TLS 占位键）
+            - { name: SHOP_DB_USE_SSL, value: "false" }
+            - { name: SPRING_DATASOURCE_URL, value: "jdbc:mysql://$(MYSQL_HOST)/shop_marketing?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=$(SHOP_DB_USE_SSL)&allowPublicKeyRetrieval=true" }
+            - { name: SPRING_DATA_REDIS_HOST, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: REDIS_HOST } } }
+            - { name: SHOP_MQ_ENDPOINTS, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: ROCKETMQ_ENDPOINTS } } }
+            - { name: SPRING_DATASOURCE_USERNAME, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-username } } }
+            - { name: SPRING_DATASOURCE_PASSWORD, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-password } } }
+            - { name: SHOP_JWT_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: jwt-secret } } }
+            - { name: SHOP_INTERNAL_TOKEN, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: internal-token } } }
+            - { name: SHOP_DATA_ENC_KEY, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: data-enc-key } } }
+            - { name: SPRING_PROFILES_ACTIVE, value: "prod" }
+          envFrom:
+            - configMapRef: { name: shop-infra-config }
+          # startupProbe 承担慢启动（最多 24*5s=120s，覆盖 MQ 消费者收敛）；
+          # 通过前 liveness/readiness 不参与判定，避免启动期误杀
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8083 }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8083 }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8083 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "500m", memory: 768Mi }
+            # JVM MaxRAMPercentage=60%（约 1.2Gi 堆）+ Metaspace/直接内存/栈，RSS 留足余量
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shop-marketing-service-pdb
+  namespace: shop
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: shop-marketing-service }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shop-marketing-service-hpa
+  namespace: shop
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shop-marketing-service
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+      # 内存阈值 85%（相对 request=768Mi，触发线≈653Mi）：kind 单节点实测稳态 RSS
+      # ≈500-580Mi（=request 的 61-74%），原 70% 阈值在无流量时也恒触发扩容，曾把
+      # 单节点内存请求推到 99% 导致 surge Pod 全部 Pending、滚动发布死锁。触发线
+      # 653Mi 仅为 2Gi limit 的 32%，距 OOMKill 仍有 1.35Gi 余量；流量扩容由 CPU 65% 兜底
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 85 }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-order-service
+  namespace: shop
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  minReadySeconds: 15
+  selector:
+    matchLabels: { app: shop-order-service }
+  template:
+    metadata:
+      labels: { app: shop-order-service }
+    spec:
+      # R-K8S 硬化：非 root（镜像内 USER 10001:10001）、非零 fsGroup、seccomp RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # 只读根文件系统的可写出口：/tmp、heapdump 目录、/app/logs（Nacos/RocketMQ 客户端
+      # 默认向 user.home/logs 落文件）。W7 需逐服务 smoke 确认无其他相对路径写文件点（§B-5 残留）。
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: heapdump, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
+      # 优雅停机窗口：preStop 10s（等 Endpoint/Ingress/Nacos 端点传播）+ JVM graceful 30s，60s 封顶
+      terminationGracePeriodSeconds: 60
+      # 生产硬反亲和：同一服务副本必须分布在不同节点（单节点 kind 验收由 ha-check 打补丁放宽）
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: shop-order-service }
+              topologyKey: kubernetes.io/hostname
+      # 主机维度硬性打散；可用区维度尽量打散（单可用区集群降级为尽力而为，不阻塞调度）
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: shop-order-service }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: shop-order-service }
+      containers:
+        - name: app
+          image: registry.example.com/shop/shop-order-service:2.0.0
+          imagePullPolicy: IfNotPresent
+          # R-K8S 硬化：禁提权、drop ALL capabilities、只读根文件系统
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: heapdump, mountPath: /tmp/heapdump }
+            - { name: logs, mountPath: /app/logs }
+          ports:
+            - containerPort: 8084
+          lifecycle:
+            preStop:
+              exec:
+                # SIGTERM 前先睡：让 kube-proxy iptables / ingress / Nacos 先摘流量，
+                # 随后 JVM 以 1 号进程收到 SIGTERM 走 graceful shutdown（见 Dockerfile exec）
+                command: ["sh", "-c", "sleep 10"]
+          env:
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_ADDR } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_NAMESPACE, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_NS } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_GROUP, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_GROUP } } }
+            - { name: SPRING_CLOUD_SENTINEL_TRANSPORT_DASHBOARD, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: SENTINEL_DASHBOARD } } }
+            # §A(R-K8S) useSSL 占位：dev/kind=false；托管 MySQL 地址与 TLS 落地后由 W1-D 在
+            # shop-infra-config 注入 SHOP_DB_USE_SSL=true（同步评估 Redis/RMQ/Nacos TLS 占位键）
+            - { name: SHOP_DB_USE_SSL, value: "false" }
+            - { name: SPRING_DATASOURCE_URL, value: "jdbc:mysql://$(MYSQL_HOST)/shop_order?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=$(SHOP_DB_USE_SSL)&allowPublicKeyRetrieval=true" }
+            - { name: SPRING_DATA_REDIS_HOST, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: REDIS_HOST } } }
+            - { name: SHOP_MQ_ENDPOINTS, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: ROCKETMQ_ENDPOINTS } } }
+            - { name: SPRING_DATASOURCE_USERNAME, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-username } } }
+            - { name: SPRING_DATASOURCE_PASSWORD, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-password } } }
+            - { name: SHOP_JWT_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: jwt-secret } } }
+            - { name: SHOP_INTERNAL_TOKEN, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: internal-token } } }
+            - { name: SHOP_DATA_ENC_KEY, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: data-enc-key } } }
+            - { name: SPRING_PROFILES_ACTIVE, value: "prod" }
+          envFrom:
+            - configMapRef: { name: shop-infra-config }
+          # startupProbe 承担慢启动（最多 24*5s=120s，覆盖 MQ 消费者收敛）；
+          # 通过前 liveness/readiness 不参与判定，避免启动期误杀
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8084 }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8084 }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8084 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "500m", memory: 768Mi }
+            # JVM MaxRAMPercentage=60%（约 1.2Gi 堆）+ Metaspace/直接内存/栈，RSS 留足余量
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shop-order-service-pdb
+  namespace: shop
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: shop-order-service }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shop-order-service-hpa
+  namespace: shop
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shop-order-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+      # 内存阈值 85%（相对 request=768Mi，触发线≈653Mi）：kind 单节点实测稳态 RSS
+      # ≈500-580Mi（=request 的 61-74%），原 70% 阈值在无流量时也恒触发扩容，曾把
+      # 单节点内存请求推到 99% 导致 surge Pod 全部 Pending、滚动发布死锁。触发线
+      # 653Mi 仅为 2Gi limit 的 32%，距 OOMKill 仍有 1.35Gi 余量；流量扩容由 CPU 65% 兜底
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 85 }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-pay-service
+  namespace: shop
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  minReadySeconds: 15
+  selector:
+    matchLabels: { app: shop-pay-service }
+  template:
+    metadata:
+      labels: { app: shop-pay-service }
+    spec:
+      # R-K8S 硬化：非 root（镜像内 USER 10001:10001）、非零 fsGroup、seccomp RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # 只读根文件系统的可写出口：/tmp、heapdump 目录、/app/logs（Nacos/RocketMQ 客户端
+      # 默认向 user.home/logs 落文件）。W7 需逐服务 smoke 确认无其他相对路径写文件点（§B-5 残留）。
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: heapdump, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
+      # 优雅停机窗口：preStop 10s（等 Endpoint/Ingress/Nacos 端点传播）+ JVM graceful 30s，60s 封顶
+      terminationGracePeriodSeconds: 60
+      # 生产硬反亲和：同一服务副本必须分布在不同节点（单节点 kind 验收由 ha-check 打补丁放宽）
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: shop-pay-service }
+              topologyKey: kubernetes.io/hostname
+      # 主机维度硬性打散；可用区维度尽量打散（单可用区集群降级为尽力而为，不阻塞调度）
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: shop-pay-service }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: shop-pay-service }
+      containers:
+        - name: app
+          image: registry.example.com/shop/shop-pay-service:2.0.0
+          imagePullPolicy: IfNotPresent
+          # R-K8S 硬化：禁提权、drop ALL capabilities、只读根文件系统
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: heapdump, mountPath: /tmp/heapdump }
+            - { name: logs, mountPath: /app/logs }
+          ports:
+            - containerPort: 8085
+          lifecycle:
+            preStop:
+              exec:
+                # SIGTERM 前先睡：让 kube-proxy iptables / ingress / Nacos 先摘流量，
+                # 随后 JVM 以 1 号进程收到 SIGTERM 走 graceful shutdown（见 Dockerfile exec）
+                command: ["sh", "-c", "sleep 10"]
+          env:
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_ADDR } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_NAMESPACE, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_NS } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_GROUP, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_GROUP } } }
+            - { name: SPRING_CLOUD_SENTINEL_TRANSPORT_DASHBOARD, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: SENTINEL_DASHBOARD } } }
+            # §A(R-K8S) useSSL 占位：dev/kind=false；托管 MySQL 地址与 TLS 落地后由 W1-D 在
+            # shop-infra-config 注入 SHOP_DB_USE_SSL=true（同步评估 Redis/RMQ/Nacos TLS 占位键）
+            - { name: SHOP_DB_USE_SSL, value: "false" }
+            - { name: SPRING_DATASOURCE_URL, value: "jdbc:mysql://$(MYSQL_HOST)/shop_pay?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=$(SHOP_DB_USE_SSL)&allowPublicKeyRetrieval=true" }
+            - { name: SPRING_DATA_REDIS_HOST, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: REDIS_HOST } } }
+            - { name: SHOP_MQ_ENDPOINTS, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: ROCKETMQ_ENDPOINTS } } }
+            - { name: SPRING_DATASOURCE_USERNAME, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-username } } }
+            - { name: SPRING_DATASOURCE_PASSWORD, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-password } } }
+            - { name: SHOP_JWT_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: jwt-secret } } }
+            - { name: SHOP_INTERNAL_TOKEN, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: internal-token } } }
+            - { name: SHOP_DATA_ENC_KEY, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: data-enc-key } } }
+            # 支付渠道（M-5）：mock 开关默认 false；六渠道 HMAC 密钥必须由 Secret 外置
+            - { name: SHOP_PAY_MOCK_CHANNELS_ENABLED, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: SHOP_PAY_MOCK_CHANNELS_ENABLED } } }
+            - { name: SHOP_PAY_ALLOW_MOCK_UNDER_PROD, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: SHOP_PAY_ALLOW_MOCK_UNDER_PROD, optional: true } } }
+            - { name: SHOP_PAY_CHANNEL_MOCK_WECHAT_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: pay-mock-wechat-secret } } }
+            - { name: SHOP_PAY_CHANNEL_MOCK_ALIPAY_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: pay-mock-alipay-secret } } }
+            - { name: SHOP_PAY_CHANNEL_MOCK_BANK_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: pay-mock-bank-secret } } }
+            - { name: SHOP_PAY_CHANNEL_MOCK_UQR_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: pay-mock-uqr-secret } } }
+            - { name: SHOP_PAY_CHANNEL_MOCK_HUABEI_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: pay-mock-huabei-secret } } }
+            - { name: SHOP_PAY_CHANNEL_MOCK_BAITIAO_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: pay-mock-baitiao-secret } } }
+            - { name: SPRING_PROFILES_ACTIVE, value: "prod" }
+          envFrom:
+            - configMapRef: { name: shop-infra-config }
+          # startupProbe 承担慢启动（最多 24*5s=120s，覆盖 MQ 消费者收敛）；
+          # 通过前 liveness/readiness 不参与判定，避免启动期误杀
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8085 }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8085 }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8085 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "500m", memory: 768Mi }
+            # JVM MaxRAMPercentage=60%（约 1.2Gi 堆）+ Metaspace/直接内存/栈，RSS 留足余量
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shop-pay-service-pdb
+  namespace: shop
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: shop-pay-service }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shop-pay-service-hpa
+  namespace: shop
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shop-pay-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+      # 内存阈值 85%（相对 request=768Mi，触发线≈653Mi）：kind 单节点实测稳态 RSS
+      # ≈500-580Mi（=request 的 61-74%），原 70% 阈值在无流量时也恒触发扩容，曾把
+      # 单节点内存请求推到 99% 导致 surge Pod 全部 Pending、滚动发布死锁。触发线
+      # 653Mi 仅为 2Gi limit 的 32%，距 OOMKill 仍有 1.35Gi 余量；流量扩容由 CPU 65% 兜底
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 85 }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-settlement-service
+  namespace: shop
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  minReadySeconds: 15
+  selector:
+    matchLabels: { app: shop-settlement-service }
+  template:
+    metadata:
+      labels: { app: shop-settlement-service }
+    spec:
+      # R-K8S 硬化：非 root（镜像内 USER 10001:10001）、非零 fsGroup、seccomp RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # 只读根文件系统的可写出口：/tmp、heapdump 目录、/app/logs（Nacos/RocketMQ 客户端
+      # 默认向 user.home/logs 落文件）。W7 需逐服务 smoke 确认无其他相对路径写文件点（§B-5 残留）。
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: heapdump, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
+      # 优雅停机窗口：preStop 10s（等 Endpoint/Ingress/Nacos 端点传播）+ JVM graceful 30s，60s 封顶
+      terminationGracePeriodSeconds: 60
+      # 生产硬反亲和：同一服务副本必须分布在不同节点（单节点 kind 验收由 ha-check 打补丁放宽）
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: shop-settlement-service }
+              topologyKey: kubernetes.io/hostname
+      # 主机维度硬性打散；可用区维度尽量打散（单可用区集群降级为尽力而为，不阻塞调度）
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: shop-settlement-service }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: shop-settlement-service }
+      containers:
+        - name: app
+          image: registry.example.com/shop/shop-settlement-service:2.0.0
+          imagePullPolicy: IfNotPresent
+          # R-K8S 硬化：禁提权、drop ALL capabilities、只读根文件系统
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: heapdump, mountPath: /tmp/heapdump }
+            - { name: logs, mountPath: /app/logs }
+          ports:
+            - containerPort: 8086
+          lifecycle:
+            preStop:
+              exec:
+                # SIGTERM 前先睡：让 kube-proxy iptables / ingress / Nacos 先摘流量，
+                # 随后 JVM 以 1 号进程收到 SIGTERM 走 graceful shutdown（见 Dockerfile exec）
+                command: ["sh", "-c", "sleep 10"]
+          env:
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_ADDR } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_NAMESPACE, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_NS } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_GROUP, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_GROUP } } }
+            - { name: SPRING_CLOUD_SENTINEL_TRANSPORT_DASHBOARD, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: SENTINEL_DASHBOARD } } }
+            # §A(R-K8S) useSSL 占位：dev/kind=false；托管 MySQL 地址与 TLS 落地后由 W1-D 在
+            # shop-infra-config 注入 SHOP_DB_USE_SSL=true（同步评估 Redis/RMQ/Nacos TLS 占位键）
+            - { name: SHOP_DB_USE_SSL, value: "false" }
+            - { name: SPRING_DATASOURCE_URL, value: "jdbc:mysql://$(MYSQL_HOST)/shop_settlement?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=$(SHOP_DB_USE_SSL)&allowPublicKeyRetrieval=true" }
+            - { name: SPRING_DATA_REDIS_HOST, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: REDIS_HOST } } }
+            - { name: SHOP_MQ_ENDPOINTS, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: ROCKETMQ_ENDPOINTS } } }
+            - { name: SPRING_DATASOURCE_USERNAME, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-username } } }
+            - { name: SPRING_DATASOURCE_PASSWORD, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-password } } }
+            - { name: SHOP_JWT_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: jwt-secret } } }
+            - { name: SHOP_INTERNAL_TOKEN, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: internal-token } } }
+            - { name: SHOP_DATA_ENC_KEY, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: data-enc-key } } }
+            - { name: SPRING_PROFILES_ACTIVE, value: "prod" }
+          envFrom:
+            - configMapRef: { name: shop-infra-config }
+          # startupProbe 承担慢启动（最多 24*5s=120s，覆盖 MQ 消费者收敛）；
+          # 通过前 liveness/readiness 不参与判定，避免启动期误杀
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8086 }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8086 }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8086 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "500m", memory: 768Mi }
+            # JVM MaxRAMPercentage=60%（约 1.2Gi 堆）+ Metaspace/直接内存/栈，RSS 留足余量
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shop-settlement-service-pdb
+  namespace: shop
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: shop-settlement-service }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shop-settlement-service-hpa
+  namespace: shop
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shop-settlement-service
+  minReplicas: 2
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+      # 内存阈值 85%（相对 request=768Mi，触发线≈653Mi）：kind 单节点实测稳态 RSS
+      # ≈500-580Mi（=request 的 61-74%），原 70% 阈值在无流量时也恒触发扩容，曾把
+      # 单节点内存请求推到 99% 导致 surge Pod 全部 Pending、滚动发布死锁。触发线
+      # 653Mi 仅为 2Gi limit 的 32%，距 OOMKill 仍有 1.35Gi 余量；流量扩容由 CPU 65% 兜底
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 85 }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-aftersale-service
+  namespace: shop
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  minReadySeconds: 15
+  selector:
+    matchLabels: { app: shop-aftersale-service }
+  template:
+    metadata:
+      labels: { app: shop-aftersale-service }
+    spec:
+      # R-K8S 硬化：非 root（镜像内 USER 10001:10001）、非零 fsGroup、seccomp RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # 只读根文件系统的可写出口：/tmp、heapdump 目录、/app/logs（Nacos/RocketMQ 客户端
+      # 默认向 user.home/logs 落文件）。W7 需逐服务 smoke 确认无其他相对路径写文件点（§B-5 残留）。
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: heapdump, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
+      # 优雅停机窗口：preStop 10s（等 Endpoint/Ingress/Nacos 端点传播）+ JVM graceful 30s，60s 封顶
+      terminationGracePeriodSeconds: 60
+      # 生产硬反亲和：同一服务副本必须分布在不同节点（单节点 kind 验收由 ha-check 打补丁放宽）
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: shop-aftersale-service }
+              topologyKey: kubernetes.io/hostname
+      # 主机维度硬性打散；可用区维度尽量打散（单可用区集群降级为尽力而为，不阻塞调度）
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: shop-aftersale-service }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: shop-aftersale-service }
+      containers:
+        - name: app
+          image: registry.example.com/shop/shop-aftersale-service:2.0.0
+          imagePullPolicy: IfNotPresent
+          # R-K8S 硬化：禁提权、drop ALL capabilities、只读根文件系统
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: heapdump, mountPath: /tmp/heapdump }
+            - { name: logs, mountPath: /app/logs }
+          ports:
+            - containerPort: 8087
+          lifecycle:
+            preStop:
+              exec:
+                # SIGTERM 前先睡：让 kube-proxy iptables / ingress / Nacos 先摘流量，
+                # 随后 JVM 以 1 号进程收到 SIGTERM 走 graceful shutdown（见 Dockerfile exec）
+                command: ["sh", "-c", "sleep 10"]
+          env:
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_ADDR } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_NAMESPACE, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_NS } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_GROUP, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_GROUP } } }
+            - { name: SPRING_CLOUD_SENTINEL_TRANSPORT_DASHBOARD, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: SENTINEL_DASHBOARD } } }
+            # §A(R-K8S) useSSL 占位：dev/kind=false；托管 MySQL 地址与 TLS 落地后由 W1-D 在
+            # shop-infra-config 注入 SHOP_DB_USE_SSL=true（同步评估 Redis/RMQ/Nacos TLS 占位键）
+            - { name: SHOP_DB_USE_SSL, value: "false" }
+            - { name: SPRING_DATASOURCE_URL, value: "jdbc:mysql://$(MYSQL_HOST)/shop_aftersale?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=$(SHOP_DB_USE_SSL)&allowPublicKeyRetrieval=true" }
+            - { name: SPRING_DATA_REDIS_HOST, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: REDIS_HOST } } }
+            - { name: SHOP_MQ_ENDPOINTS, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: ROCKETMQ_ENDPOINTS } } }
+            - { name: SPRING_DATASOURCE_USERNAME, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-username } } }
+            - { name: SPRING_DATASOURCE_PASSWORD, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: mysql-password } } }
+            - { name: SHOP_JWT_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: jwt-secret } } }
+            - { name: SHOP_INTERNAL_TOKEN, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: internal-token } } }
+            - { name: SHOP_DATA_ENC_KEY, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: data-enc-key } } }
+            - { name: SPRING_PROFILES_ACTIVE, value: "prod" }
+          envFrom:
+            - configMapRef: { name: shop-infra-config }
+          # startupProbe 承担慢启动（最多 24*5s=120s，覆盖 MQ 消费者收敛）；
+          # 通过前 liveness/readiness 不参与判定，避免启动期误杀
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8087 }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8087 }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8087 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "500m", memory: 768Mi }
+            # JVM MaxRAMPercentage=60%（约 1.2Gi 堆）+ Metaspace/直接内存/栈，RSS 留足余量
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shop-aftersale-service-pdb
+  namespace: shop
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: shop-aftersale-service }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shop-aftersale-service-hpa
+  namespace: shop
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shop-aftersale-service
+  minReplicas: 2
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+      # 内存阈值 85%（相对 request=768Mi，触发线≈653Mi）：kind 单节点实测稳态 RSS
+      # ≈500-580Mi（=request 的 61-74%），原 70% 阈值在无流量时也恒触发扩容，曾把
+      # 单节点内存请求推到 99% 导致 surge Pod 全部 Pending、滚动发布死锁。触发线
+      # 653Mi 仅为 2Gi limit 的 32%，距 OOMKill 仍有 1.35Gi 余量；流量扩容由 CPU 65% 兜底
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 85 }
+
+---
+# ============ 7 个业务 ClusterIP Service（R-K8S 补齐卡内清单） ============
+# 服务间调用默认仍走 Nacos 发现（网关 lb://<name> 经 Nacos 实例解析，本变更不改发现链路）；
+# Service 提供 k8s 原生稳定入口（排障/actuator/未来 discovery-in-k8s 前置），业务与 actuator 同端口。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-user-service
+  namespace: shop
+spec:
+  type: ClusterIP
+  selector: { app: shop-user-service }
+  ports:
+    - { name: http, port: 80, targetPort: 8081, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-product-service
+  namespace: shop
+spec:
+  type: ClusterIP
+  selector: { app: shop-product-service }
+  ports:
+    - { name: http, port: 80, targetPort: 8082, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-marketing-service
+  namespace: shop
+spec:
+  type: ClusterIP
+  selector: { app: shop-marketing-service }
+  ports:
+    - { name: http, port: 80, targetPort: 8083, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-order-service
+  namespace: shop
+spec:
+  type: ClusterIP
+  selector: { app: shop-order-service }
+  ports:
+    - { name: http, port: 80, targetPort: 8084, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-pay-service
+  namespace: shop
+spec:
+  type: ClusterIP
+  selector: { app: shop-pay-service }
+  ports:
+    - { name: http, port: 80, targetPort: 8085, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-settlement-service
+  namespace: shop
+spec:
+  type: ClusterIP
+  selector: { app: shop-settlement-service }
+  ports:
+    - { name: http, port: 80, targetPort: 8086, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-aftersale-service
+  namespace: shop
+spec:
+  type: ClusterIP
+  selector: { app: shop-aftersale-service }
+  ports:
+    - { name: http, port: 80, targetPort: 8087, protocol: TCP }
+---
+# 网关 HPA（R-K8S）：网关 Deployment/Service/PDB 均在 00-namespace-config.yaml（W1-D 领地），
+# 仅 HPA 缺失，补在本文件；阈值与业务同基准 CPU 65% / MEM 85%（网关 mem request=512Mi，
+# 85% 触发线≈435Mi，距 1Gi limit 余量充足），min 2 与 PDB/反亲和基线一致，max 4。
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shop-gateway-hpa
+  namespace: shop
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shop-gateway
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 65 }
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 85 }

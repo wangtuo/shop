@@ -1,0 +1,220 @@
+########## TOPIC %DLQ%cg_product_shipped (maxOffset=3) ##########
+---- offset 0 ----
+OffsetID:            7F00000100002A9F00000000142065BF
+Topic:               %DLQ%cg_product_shipped
+Tags:                [null]
+Keys:                [260917016416000055]
+Queue ID:            0
+Queue Offset:        0
+CommitLog Offset:    337667519
+Reconsume Times:     18
+Born Timestamp:      2026-09-16 22:27:05,820
+Store Timestamp:     2026-09-17 16:23:20,797
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F0000000014206060, RETRY_TOPIC=%RETRY%cg_product_shipped_shop_order_shipped, MSG_REGION=DefaultRegion, UNIQ_KEY=01EACB1E208CD84A2D0ABCB1B90000000B, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789647684667, PGROUP=shop_order_shipped, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789597625820, KEYS=260917016416000055, WAIT=false, TRACE_ON=true, MAX_OFFSET=3}
+Message Body Path:   /tmp/rocketmq/msgbodys/01EACB1E208CD84A2D0ABCB1B90000000B
+
+
+WARN: No Consumer---- offset 1 ----
+OffsetID:            7F00000100002A9F000000001448F7F4
+Topic:               %DLQ%cg_product_shipped
+Tags:                [null]
+Keys:                [260918015072000030]
+Queue ID:            0
+Queue Offset:        1
+CommitLog Offset:    340326388
+Reconsume Times:     18
+Born Timestamp:      2026-09-18 10:28:40,256
+Store Timestamp:     2026-09-18 16:33:48,115
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F000000001448EC6A, RETRY_TOPIC=%RETRY%cg_product_shipped_shop_order_shipped, MSG_REGION=DefaultRegion, UNIQ_KEY=01361A05EE5E9766430ABEAC56000001AB, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789727320265, PGROUP=shop_order_shipped, traceId=df77d4e89630b5552047cb2c3d11f598, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789727320256, KEYS=260918015072000030, WAIT=false, TRACE_ON=true, MAX_OFFSET=3}
+Message Body Path:   /tmp/rocketmq/msgbodys/01361A05EE5E9766430ABEAC56000001AB
+
+
+WARN: No Consumer---- offset 2 ----
+OffsetID:            7F00000100002A9F000000001448FC08
+Topic:               %DLQ%cg_product_shipped
+Tags:                [null]
+Keys:                [260918014624000026]
+Queue ID:            0
+Queue Offset:        2
+CommitLog Offset:    340327432
+Reconsume Times:     18
+Born Timestamp:      2026-09-18 10:28:28,114
+Store Timestamp:     2026-09-18 16:33:48,124
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F000000001448F014, RETRY_TOPIC=%RETRY%cg_product_shipped_shop_order_shipped, MSG_REGION=DefaultRegion, UNIQ_KEY=01361A05EE5E9766430ABEAC49000001A1, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789727308150, PGROUP=shop_order_shipped, traceId=8fd97b910d9c3c932ffc602d088f9914, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789727308114, KEYS=260918014624000026, WAIT=false, TRACE_ON=true, MAX_OFFSET=3}
+Message Body Path:   /tmp/rocketmq/msgbodys/01361A05EE5E9766430ABEAC49000001A1
+
+
+WARN: No Consumer########## TOPIC %DLQ%cg_marketing_groupbuy (maxOffset=3) ##########
+---- offset 0 ----
+OffsetID:            7F00000100002A9F00000000142285E8
+Topic:               %DLQ%cg_marketing_groupbuy
+Tags:                [4]
+Keys:                [260917039136000001]
+Queue ID:            0
+Queue Offset:        0
+CommitLog Offset:    337806824
+Reconsume Times:     18
+Born Timestamp:      2026-09-17 16:39:55,070
+Store Timestamp:     2026-09-17 21:59:30,497
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F00000000142280F4, RETRY_TOPIC=%RETRY%cg_marketing_groupbuy_shop_groupbuy_event, MSG_REGION=DefaultRegion, UNIQ_KEY=017E1CA4781275833D0ABD835D00000001, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789663156901, PGROUP=shop_groupbuy_event, traceId=0d212e161c7c10b238ba97abfb7318e5, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, TAGS=4, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789663195070, KEYS=260917039136000001, WAIT=false, TRACE_ON=true, MAX_OFFSET=3}
+Message Body Path:   /tmp/rocketmq/msgbodys/017E1CA4781275833D0ABD835D00000001
+
+
+WARN: No Consumer---- offset 1 ----
+OffsetID:            7F00000100002A9F0000000014236D9C
+Topic:               %DLQ%cg_marketing_groupbuy
+Tags:                [4]
+Keys:                [260917032736000002]
+Queue ID:            0
+Queue Offset:        1
+CommitLog Offset:    337866140
+Reconsume Times:     18
+Born Timestamp:      2026-09-17 18:17:49,965
+Store Timestamp:     2026-09-18 00:40:39,362
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F00000000142365D0, RETRY_TOPIC=%RETRY%cg_marketing_groupbuy_shop_groupbuy_event, MSG_REGION=DefaultRegion, UNIQ_KEY=017E1CA4781275833D0ABD84C300000002, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789669045182, PGROUP=shop_groupbuy_event, traceId=c00dbf9f8675dc635be70b3526765ce1, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, TAGS=4, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789669069965, KEYS=260917032736000002, WAIT=false, TRACE_ON=true, MAX_OFFSET=3}
+Message Body Path:   /tmp/rocketmq/msgbodys/017E1CA4781275833D0ABD84C300000002
+
+
+WARN: No Consumer---- offset 2 ----
+OffsetID:            7F00000100002A9F000000001423F4FF
+Topic:               %DLQ%cg_marketing_groupbuy
+Tags:                [4]
+Keys:                [260917038736000003]
+Queue ID:            0
+Queue Offset:        2
+CommitLog Offset:    337900799
+Reconsume Times:     18
+Born Timestamp:      2026-09-17 22:45:57,402
+Store Timestamp:     2026-09-18 04:08:57,053
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F000000001423F00B, RETRY_TOPIC=%RETRY%cg_marketing_groupbuy_shop_groupbuy_event, MSG_REGION=DefaultRegion, UNIQ_KEY=017E1CA4781275833D0ABD87CE00000003, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789685169920, PGROUP=shop_groupbuy_event, traceId=391cd9f18360b3c440459ac3d2cdf420, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, TAGS=4, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789685157402, KEYS=260917038736000003, WAIT=false, TRACE_ON=true, MAX_OFFSET=3}
+Message Body Path:   /tmp/rocketmq/msgbodys/017E1CA4781275833D0ABD87CE00000003
+
+
+WARN: No Consumer########## TOPIC %DLQ%cg_product_aftersale (maxOffset=6) ##########
+---- offset 0 ----
+OffsetID:            7F00000100002A9F0000000000306306
+Topic:               %DLQ%cg_product_aftersale
+Tags:                [50]
+Keys:                [AS202609170000000003]
+Queue ID:            0
+Queue Offset:        0
+CommitLog Offset:    3171078
+Reconsume Times:     18
+Born Timestamp:      2026-09-16 18:10:01,535
+Store Timestamp:     2026-09-16 21:00:02,663
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F0000000000305A44, RETRY_TOPIC=%RETRY%cg_product_aftersale_shop_aftersale_changed, MSG_REGION=DefaultRegion, UNIQ_KEY=0166592E5D297A0E360ABC757900000004, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789582201566, PGROUP=shop_aftersale_changed, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, TAGS=50, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789582201535, KEYS=AS202609170000000003, WAIT=false, TRACE_ON=true, MAX_OFFSET=6}
+Message Body Path:   /tmp/rocketmq/msgbodys/0166592E5D297A0E360ABC757900000004
+
+
+WARN: No Consumer---- offset 1 ----
+OffsetID:            7F00000100002A9F00000000003066B2
+Topic:               %DLQ%cg_product_aftersale
+Tags:                [50]
+Keys:                [AS202609170000000007]
+Queue ID:            0
+Queue Offset:        1
+CommitLog Offset:    3172018
+Reconsume Times:     18
+Born Timestamp:      2026-09-16 18:10:11,804
+Store Timestamp:     2026-09-16 21:00:02,665
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F0000000000305D84, RETRY_TOPIC=%RETRY%cg_product_aftersale_shop_aftersale_changed, MSG_REGION=DefaultRegion, UNIQ_KEY=0166592E5D297A0E360ABC758300000015, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789582211819, PGROUP=shop_aftersale_changed, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, TAGS=50, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789582211804, KEYS=AS202609170000000007, WAIT=false, TRACE_ON=true, MAX_OFFSET=6}
+Message Body Path:   /tmp/rocketmq/msgbodys/0166592E5D297A0E360ABC758300000015
+
+
+WARN: No Consumer---- offset 2 ----
+OffsetID:            6451174000002A9F0000000014197A46
+Topic:               %DLQ%cg_product_aftersale
+Tags:                [50]
+Keys:                [AS202609170000000013]
+Queue ID:            0
+Queue Offset:        2
+CommitLog Offset:    337214022
+Reconsume Times:     18
+Born Timestamp:      2026-09-16 22:27:06,071
+Store Timestamp:     2026-09-17 05:45:04,700
+Born Host:           100.81.23.64:10911
+Store Host:          100.81.23.64:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=6451174000002A9F0000000014197183, RETRY_TOPIC=%RETRY%cg_product_aftersale_shop_aftersale_changed, MSG_REGION=DefaultRegion, UNIQ_KEY=01EACB1E208CD84B050ABCB1B900000015, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789597626092, PGROUP=shop_aftersale_changed, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, TAGS=50, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789597626071, KEYS=AS202609170000000013, WAIT=false, TRACE_ON=true, MAX_OFFSET=6}
+Message Body Path:   /tmp/rocketmq/msgbodys/01EACB1E208CD84B050ABCB1B900000015
+
+
+WARN: No Consumer---- offset 3 ----
+OffsetID:            6451174000002A9F0000000014197E11
+Topic:               %DLQ%cg_product_aftersale
+Tags:                [50]
+Keys:                [AS202609170000000009]
+Queue ID:            0
+Queue Offset:        3
+CommitLog Offset:    337214993
+Reconsume Times:     18
+Born Timestamp:      2026-09-16 22:26:55,889
+Store Timestamp:     2026-09-17 05:45:04,710
+Born Host:           100.81.23.64:10911
+Store Host:          100.81.23.64:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=6451174000002A9F00000000141974E2, RETRY_TOPIC=%RETRY%cg_product_aftersale_shop_aftersale_changed, MSG_REGION=DefaultRegion, UNIQ_KEY=01EACB1E208CD84B050ABCB1AF00000004, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789597615911, PGROUP=shop_aftersale_changed, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, TAGS=50, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789597615889, KEYS=AS202609170000000009, WAIT=false, TRACE_ON=true, MAX_OFFSET=6}
+Message Body Path:   /tmp/rocketmq/msgbodys/01EACB1E208CD84B050ABCB1AF00000004
+
+
+WARN: No Consumer---- offset 4 ----
+OffsetID:            7F00000100002A9F00000000144903CC
+Topic:               %DLQ%cg_product_aftersale
+Tags:                [50]
+Keys:                [AS202609180000000001]
+Queue ID:            0
+Queue Offset:        4
+CommitLog Offset:    340329420
+Reconsume Times:     18
+Born Timestamp:      2026-09-18 10:28:29,441
+Store Timestamp:     2026-09-18 16:33:48,179
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F000000001448E575, RETRY_TOPIC=%RETRY%cg_product_aftersale_shop_aftersale_changed, MSG_REGION=DefaultRegion, UNIQ_KEY=018A31E0BA159169160ABEAC4D00000004, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789727309449, PGROUP=shop_aftersale_changed, traceId=ee4bc590f1585fa1cde9693167d14eb7, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, TAGS=50, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789727309441, KEYS=AS202609180000000001, WAIT=false, TRACE_ON=true, MAX_OFFSET=6}
+Message Body Path:   /tmp/rocketmq/msgbodys/018A31E0BA159169160ABEAC4D00000004
+
+
+WARN: No Consumer---- offset 5 ----
+OffsetID:            7F00000100002A9F00000000144907A4
+Topic:               %DLQ%cg_product_aftersale
+Tags:                [50]
+Keys:                [AS202609180000000005]
+Queue ID:            0
+Queue Offset:        5
+CommitLog Offset:    340330404
+Reconsume Times:     18
+Born Timestamp:      2026-09-18 10:28:39,612
+Store Timestamp:     2026-09-18 16:33:48,179
+Born Host:           127.0.0.1:10911
+Store Host:          127.0.0.1:10911
+System Flag:         0
+Properties:          {ORIGIN_MESSAGE_ID=7F00000100002A9F000000001448E8E1, RETRY_TOPIC=%RETRY%cg_product_aftersale_shop_aftersale_changed, MSG_REGION=DefaultRegion, UNIQ_KEY=018A31E0BA159169160ABEAC5700000015, CLUSTER=DefaultCluster, 1ST_POP_TIME=1789727319618, PGROUP=shop_aftersale_changed, traceId=0ee885c80a1fa91b261a97b5506d2395, RECONSUME_TIME=0, MIN_OFFSET=0, DELAY=0, TAGS=50, __BORNHOST=DJ6NGHYYXL, BORN_TIMESTAMP=1789727319612, KEYS=AS202609180000000005, WAIT=false, TRACE_ON=true, MAX_OFFSET=6}
+Message Body Path:   /tmp/rocketmq/msgbodys/018A31E0BA159169160ABEAC5700000015
+
+
+WARN: No Consumer

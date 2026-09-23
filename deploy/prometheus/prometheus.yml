@@ -1,0 +1,59 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# W6-2 / O2：告警规则（容器内 rules 目录只读挂载，见 docker-compose.yml）。
+# 注意：promtool 测试文件 shop-alerts.test.yml 与规则同目录但不匹配 *.yml 加载口径时
+# 由 promtool 单独使用；Prometheus 仅加载 shop-alerts.yml。
+rule_files:
+  - /etc/prometheus/rules/shop-alerts.yml
+
+# W6-2 / O2：Alertmanager 为 compose 内服务（alertmanager:9093）。
+# Alertmanager 宕机不影响 Prometheus 抓取与规则评估：告警在 Prometheus 侧仍保持
+# Pending/Firing 状态并在 AM 恢复后自动补发，抓取链路与通知链路相互独立。
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+  - job_name: shop-gateway
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8080']
+        labels: { app: shop-gateway }
+  - job_name: shop-user-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8081']
+        labels: { app: shop-user-service }
+  - job_name: shop-product-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8082']
+        labels: { app: shop-product-service }
+  - job_name: shop-marketing-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8083']
+        labels: { app: shop-marketing-service }
+  - job_name: shop-order-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8084']
+        labels: { app: shop-order-service }
+  - job_name: shop-pay-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8085']
+        labels: { app: shop-pay-service }
+  - job_name: shop-settlement-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8086']
+        labels: { app: shop-settlement-service }
+  - job_name: shop-aftersale-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8087']
+        labels: { app: shop-aftersale-service }

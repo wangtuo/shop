@@ -1,0 +1,55 @@
+# TLS 入口（design 10.3：支付链路全程 SSL）
+#
+# 证书两种来源（二选一）：
+#   A. 生产推荐 cert-manager 自动签发：
+#        helm install cert-manager ... 后创建 ClusterIssuer（letsencrypt-prod）
+#        Ingress 保留 cert-manager.io/cluster-issuer 注解即可自动续期
+#   B. 自签证书（本地/内网验收）：
+#        deploy/kubernetes/tls/gen-self-signed.sh shop.local
+#        脚本会创建 Secret shop-gateway-tls
+#
+# 前置：ingress-nginx（kind: kubectl apply -f
+#   https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml）
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop-gateway
+  namespace: shop
+  annotations:
+    # 生产：cert-manager 自动签发；自签验收时可删除该注解
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # HTTP 80 强制跳转 HTTPS
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # R-K8S：TLS 下限 1.2，关闭 TLSv1.0/1.1（支付链路全程 SSL，design 10.3）。
+    # 优先 TLSv1.3：在 ingress-nginx 控制器 ConfigMap 设 ssl-protocols: "TLSv1.2 TLSv1.3"
+    # （全局，不走已禁用的 snippet 注解）；若控制器版本不支持本注解，ha-check TLS
+    # 验收会暴露，需升级 ingress-nginx（残留记录见 ACCEPTANCE.md）。
+    nginx.ingress.kubernetes.io/ssl-min-version: "TLSv1.2"
+    # HSTS（1 年，含子域名）：不使用 configuration-snippet——ingress-nginx 默认关闭
+    # snippet 注解（webhook 直接拒绝该 Ingress），安全加固基线也建议保持关闭。
+    # HSTS 改走控制器全局 add-headers：
+    #   kind 验收由 ha-check.sh 写入 ingress-nginx/custom-headers ConfigMap 并
+    #   patch 控制器 ConfigMap 的 add-headers；生产在 ingress-nginx 控制器
+    #   ConfigMap 预置 add-headers: "ingress-nginx/custom-headers"（值：
+    #   Strict-Transport-Security: max-age=31536000; includeSubDomains; preload）。
+    # 支付回调等请求体
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - shop.example.com
+      secretName: shop-gateway-tls
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shop-gateway
+                port:
+                  number: 80

@@ -1,0 +1,2 @@
+orders_status20	20
+pay_status30	20

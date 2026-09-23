@@ -1,0 +1,237 @@
+# Shop 交易系统告警规则（W6-2 / O2）
+#
+# 规则清单来源：GAP_PLAN_OBSERVABILITY.md O2（17 个告警卡项）。
+# JVM 堆与 Druid 连接池两个卡项按不同阈值/级别各拆 2 条 alert，故共 19 条规则。
+#
+# 标签口径：
+#   - job=~"shop-.*" 对应 deploy/prometheus/prometheus.yml 的 8 个抓取 job（compose 静态标签 app）；
+#   - application 标签由应用侧 common tag（C55）导出，业务/JVM/MQ 等应用指标统一用 application。
+#
+# runbook_url 指向内部 runbook 站点（环境占位域名，随真实通知通道一并由部署环境接入）；
+# 阈值需在 PERF 复测后按基线校准（GAP_PLAN O2 回归面）。
+#
+# 环境残留指标（无序列时规则不触发，不依赖仓库交付的 exporter）：
+#   kube_pod_container_status_restarts_total（kube-state-metrics）、
+#   rocketmq_group_diff（broker exporter，shop_mq_consume_lag 未具备前的环境占位）。
+
+groups:
+  # ============ service：服务可用性 / HTTP 质量（卡项 1/2/3/4/5）============
+  - name: shop-service
+    rules:
+      - alert: ShopServiceDown
+        expr: up{job=~"shop-.*"} == 0
+        for: 2m
+        labels:
+          severity: P1
+          team: shop-platform
+        annotations:
+          summary: "服务宕机：{{ $labels.job }}（{{ $labels.instance }}）"
+          description: "prometheus 连续 2m 抓取失败，job={{ $labels.job }} instance={{ $labels.instance }}。检查进程/健康检查/网络与注册中心摘除情况。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopServiceDown"
+
+      - alert: ShopHealthyInstancesLow
+        expr: sum by (app) (up{job=~"shop-.*"}) < 2
+        for: 3m
+        labels:
+          severity: P1
+          team: shop-platform
+        annotations:
+          summary: "健康实例不足：{{ $labels.app }} 在线副本 < 2"
+          description: "K8s 多副本形态下 {{ $labels.app }} 健康实例数连续 3m 小于 2，副本冗余失效。本地一体化单副本环境恒满足，可用 Alertmanager silence 或 Prometheus UI 暂停该规则。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopHealthyInstancesLow"
+
+      - alert: ShopPodRestartsHigh
+        expr: increase(kube_pod_container_status_restarts_total{namespace="shop"}[1h]) > 2
+        for: 10m
+        labels:
+          severity: P2
+          team: shop-platform
+        annotations:
+          summary: "Pod 频繁重启：{{ $labels.pod }}（1h 内 {{ $value | printf \"%.0f\" }} 次）"
+          description: "namespace=shop 的 Pod {{ $labels.pod }} 近 1h 重启超过 2 次。排查 OOMKilled、存活探针、启动失败（kubectl describe/logs）。指标来自 kube-state-metrics，属环境提供方职责。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopPodRestartsHigh"
+
+      - alert: ShopHttp5xxRateHigh
+        expr: sum by (application) (rate(http_server_requests_seconds_count{status=~"5.."}[5m])) / sum by (application) (rate(http_server_requests_seconds_count[5m])) > 0.02
+        for: 5m
+        labels:
+          severity: P1
+          team: shop-platform
+        annotations:
+          summary: "5xx 率超 2%：{{ $labels.application }}（{{ $value | humanizePercentage }}）"
+          description: "{{ $labels.application }} 5xx 占比连续 5m 高于 2%。依赖全局异常处理器返回真实状态码；兜底异常 200 化期间口径受限，需结合业务异常率面板共同判断。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopHttp5xxRateHigh"
+
+      - alert: ShopHttpP99LatencyHigh
+        expr: histogram_quantile(0.99, sum by (le, application) (rate(http_server_requests_seconds_bucket[5m]))) * 1000 > 800
+        for: 10m
+        labels:
+          severity: P2
+          team: shop-platform
+        annotations:
+          summary: "P99 延迟超 800ms：{{ $labels.application }}（{{ $value | printf \"%.0f\" }}ms）"
+          description: "{{ $labels.application }} 全量 URI 的 HTTP 服务端 P99（毫秒）连续 10m 高于 800ms。依赖应用侧 percentiles-histogram 开启（O7），未开启前 _bucket 无序列。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopHttpP99LatencyHigh"
+
+  # ============ jvm：堆 / GC（卡项 6/7，拆 4 条规则中的 3 条）============
+  - name: shop-jvm
+    rules:
+      - alert: ShopJvmHeapHigh
+        expr: sum by (application) (jvm_memory_used_bytes{area="heap"}) / sum by (application) (jvm_memory_max_bytes{area="heap"}) > 0.85
+        for: 10m
+        labels:
+          severity: P2
+          team: shop-platform
+        annotations:
+          summary: "JVM 堆使用率超 85%：{{ $labels.application }}（{{ $value | humanizePercentage }}）"
+          description: "{{ $labels.application }} 堆占用率连续 10m 高于 85%，关注内存泄漏/缓存膨胀与 GC 趋势；若继续升至 95% 升级 P1。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopJvmHeapHigh"
+
+      - alert: ShopJvmHeapCritical
+        expr: sum by (application) (jvm_memory_used_bytes{area="heap"}) / sum by (application) (jvm_memory_max_bytes{area="heap"}) > 0.95
+        for: 5m
+        labels:
+          severity: P1
+          team: shop-platform
+        annotations:
+          summary: "JVM 堆使用率超 95%：{{ $labels.application }}（{{ $value | humanizePercentage }}）"
+          description: "{{ $labels.application }} 堆占用率连续 5m 高于 95%，濒临 OOM/长时间 Full GC，立即 dump 并扩容/回滚。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopJvmHeapCritical"
+
+      - alert: ShopGcPauseHigh
+        expr: sum by (application) (rate(jvm_gc_pause_seconds_sum[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: P2
+          team: shop-platform
+        annotations:
+          summary: "GC 停顿占比超 10%：{{ $labels.application }}（{{ $value | printf \"%.2f\" }}s/s）"
+          description: "{{ $labels.application }} 近 5m GC pause 时间占比连续 10m 高于 10%（>0.1s/s），结合堆面板判断是否需要调堆/排查泄漏。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopGcPauseHigh"
+
+  # ============ middleware：Druid / Redis / RocketMQ / Outbox / 限流 / 调度（卡项 8-15）============
+  - name: shop-middleware
+    rules:
+      - alert: ShopDruidWaitThreads
+        expr: shop_druid_wait > 0
+        for: 2m
+        labels:
+          severity: P1
+          team: shop-middleware
+        annotations:
+          summary: "Druid 连接获取排队：{{ $labels.application }}（等待 {{ $value }} 线程）"
+          description: "{{ $labels.application }} 存在线程等待获取数据库连接（shop_druid_wait）连续 2m，池容量不足或慢 SQL 占用连接。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopDruidWaitThreads"
+
+      - alert: ShopDruidPoolNearLimit
+        expr: shop_druid_active / shop_druid_max > 0.9
+        for: 5m
+        labels:
+          severity: P2
+          team: shop-middleware
+        annotations:
+          summary: "Druid 连接池使用率超 90%：{{ $labels.application }}（{{ $value | humanizePercentage }}）"
+          description: "{{ $labels.application }} 活跃连接/池上限连续 5m 高于 90%，结合慢查询与 TPS 基线评估扩容。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopDruidPoolNearLimit"
+
+      - alert: ShopRedisFailures
+        expr: rate(shop_redis_failure_total[3m]) > 0
+        for: 2m
+        labels:
+          severity: P1
+          team: shop-middleware
+        annotations:
+          summary: "Redis 调用失败：{{ $labels.application }}（{{ $value | printf \"%.2f\" }} 次/秒）"
+          description: "{{ $labels.application }} 近 3m Redis 操作失败速率连续 2m 大于 0（应用侧埋点口径，无 redis exporter 时以此为准）。检查 redis 可用性、连接池与降级开关。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopRedisFailures"
+
+      - alert: ShopMqConsumeLagHigh
+        expr: max by (application, consumer_group, topic) (shop_mq_consume_lag) > 100
+        for: 10m
+        labels:
+          severity: P2
+          team: shop-middleware
+        annotations:
+          summary: "MQ 消费积压：{{ $labels.consumer_group }}/{{ $labels.topic }}（lag {{ $value }}）"
+          description: "消费组 {{ $labels.consumer_group }} 积压连续 10m 超过 100（阈值待 PERF 基线校准）。应用埋点缺失时可由 broker exporter 的 rocketmq_group_diff 替代（环境占位）。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopMqConsumeLagHigh"
+
+      - alert: ShopMqDeadLetterIncreased
+        expr: increase(shop_mq_dead_letter_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: P1
+          team: shop-middleware
+        annotations:
+          summary: "出现死信消息：{{ $labels.application }} {{ $labels.topic }}（+{{ $value }}）"
+          description: "10m 窗口内 DLQ 出现任何新增即立即 P1（for 0m）。立即排查消费失败根因并人工兜底重投，防止漏单/掉单（Z4/Z10）。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopMqDeadLetterIncreased"
+
+      - alert: ShopOutboxStuck
+        expr: shop_outbox_pending{lane="fast"} > 0 and on (application, lane) shop_outbox_oldest_age_seconds{lane="fast"} > 120
+        for: 3m
+        labels:
+          severity: P1
+          team: shop-middleware
+        annotations:
+          summary: "Outbox 快速通道卡死：{{ $labels.application }}（pending={{ $value }}，最老 >120s）"
+          description: "{{ $labels.application }} fast lane 存在 status=0 且 deliver_at<=NOW() 的滞留记录，且最老记录年龄连续 3m 超过 120s。检查 outbox relay 与 MQ 连接，防止本地消息表死信。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopOutboxStuck"
+
+      - alert: ShopRatelimitHit
+        expr: increase(shop_ratelimit_hit_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: P3
+          team: shop-middleware
+        annotations:
+          summary: "限流持续命中：{{ $labels.application }} {{ $labels.resource }}"
+          description: "{{ $labels.application }} 资源 {{ $labels.resource }} 连续 5m 窗口均有限流命中（P3，群消息/日报）。若突增超过基线 5 倍应人工升级 P2 排查流量来源。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopRatelimitHit"
+
+      - alert: ShopMqPublishFailed
+        expr: increase(shop_mq_publish_failed_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: P1
+          team: shop-middleware
+        annotations:
+          summary: "MQ 生产失败：{{ $labels.application }} {{ $labels.topic }}（+{{ $value }}）"
+          description: "5m 窗口内出现 MQ 生产失败即 P1（for 0m）。生产事务/Outbox 兜底是否生效需立即确认，防止订单事件丢失。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopMqPublishFailed"
+
+      - alert: ShopSchedulerHeartbeatMissing
+        expr: time() - shop_scheduler_last_run_seconds > 900
+        for: 10m
+        labels:
+          severity: P2
+          team: shop-middleware
+        annotations:
+          summary: "定时任务漏跑：{{ $labels.application }} {{ $labels.name }}"
+          description: "{{ $labels.application }} 任务 {{ $labels.name }} 距上次成功执行超过 900s 且持续 10m。阈值语义为 2× 标称周期（WithdrawAuditJob/结算批/outbox relay），当前按最长标称周期统一兜底，分任务阈值需按各 job 周期校准。检查 ShedLock 锁残留与执行节点存活。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopSchedulerHeartbeatMissing"
+
+  # ============ business：支付 / 资金（卡项 16/17）============
+  - name: shop-business
+    rules:
+      - alert: ShopPayFailureRateHigh
+        expr: (rate(shop_pay_failed_total[5m]) / rate(shop_pay_total[5m])) > 0.05 and on (application) (rate(shop_pay_total[5m]) > 0)
+        for: 5m
+        labels:
+          severity: P2
+          team: shop-business
+        annotations:
+          summary: "支付失败率超 5%：{{ $labels.application }}（{{ $value | humanizePercentage }}）"
+          description: "{{ $labels.application }} 支付/退款失败率连续 5m 高于 5%（已过滤无支付流量窗口）。排查支付渠道、签名/证书与回调链路。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopPayFailureRateHigh"
+
+      - alert: ShopDepositInsufficient
+        expr: increase(shop_deposit_insufficient_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: P3
+          team: shop-business
+        annotations:
+          summary: "保证金不足事件：{{ $labels.application }}（+{{ $value }}）"
+          description: "10m 窗口内出现商家保证金不足拦截（P3，群消息/日报）。通知商家补缴并关注当日经营拦截量。"
+          runbook_url: "https://runbooks.shop.internal/o2/ShopDepositInsufficient"

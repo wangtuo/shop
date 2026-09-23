@@ -1,0 +1,178 @@
+# 生产级高可用部署清单（命名空间 shop）
+#
+# 形态：
+#   - 每个业务服务 2 副本起步（order/pay/product 高峰可 HPA 到 6），pod 硬反亲和跨节点
+#   - PodDisruptionBudget 保证滚动/驱逐时至少 1 副本在线
+#   - 无状态服务通过 nacos 注册；网关 2 副本 + Service
+#   - MySQL/Redis/RocketMQ/Nacos 在生产由云厂商托管或独立 StatefulSet 集群，
+#     本文件只给出应用 Workload，中间件以外部地址注入 ConfigMap/Secret
+#
+# Secret 不在本清单内：占位符 Secret 禁止随 kubectl apply 批量下发/覆盖真实值。
+#   - 模板与字段清单：15-secret-template.yaml
+#   - 从环境变量/KMS 引导：bash deploy/kubernetes/create-secrets.sh
+#     （已存在的 Secret 默认拒绝覆盖，显式 ALLOW_OVERWRITE=1 才替换）
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+  labels:
+    app.kubernetes.io/part-of: shop-trading
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shop-infra-config
+  namespace: shop
+data:
+  NACOS_ADDR: "nacos.shop-infra:8848"
+  NACOS_NS: "prod"
+  # 注册/发现分组：8 个工作负载必须同组，且不与本地/其他环境混用 DEFAULT_GROUP
+  NACOS_GROUP: "shop-prod"
+  MYSQL_HOST: "mysql-proxy.shop-infra:3306"
+  REDIS_HOST: "redis-cluster.shop-infra"
+  ROCKETMQ_ENDPOINTS: "rmq-proxy.shop-infra:8081"
+  SENTINEL_DASHBOARD: "sentinel.shop-infra:8858"
+  # 生产严禁 MOCK 支付渠道（pay 服务 prod profile 启动 fail-fast，见 ChannelSecretProvider）
+  SHOP_PAY_MOCK_CHANNELS_ENABLED: "false"
+  # ===== R-Z2 / C16 密钥与口令外部化（prod 基线，ha-check grep 守护）=====
+  # 环境标识：ShedLock 锁前缀/限流键前缀/密钥校验均按环境隔离，prod 必须显式 prod。
+  SHOP_ENV: "prod"
+  # 打开 framework 启动 fail-fast：JWT/internal token 必须为外部强随机值；
+  # DB 口令禁止空/root/长度<8（ShopSecretEnvironmentValidator，prod profile 默认同样生效）。
+  SHOP_SECURITY_REQUIRE_ENV_SECRETS: "true"
+  SHOP_SECURITY_REQUIRE_ENV_DB: "true"
+  # 注意：DB/Redis 凭据【不是】ConfigMap 项，业务 Deployment 必须用 secretKeyRef 从
+  # shop-infra-secret 注入三个环境变量（键位见 15-secret-template.yaml）：
+  #   SHOP_DB_USER        <- mysql-username
+  #   SHOP_DB_PASSWORD    <- mysql-password
+  #   SHOP_REDIS_PASSWORD <- redis-password
+  # 7 个业务服务 application.yml 已占位 ${SHOP_DB_USER:root}/${SHOP_DB_PASSWORD:root}/
+  # ${SHOP_REDIS_PASSWORD:}（dev 默认裸跑，prod 缺注入即 fail-fast）。
+---
+# ============ 网关 ============
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-gateway
+  namespace: shop
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  minReadySeconds: 15
+  selector:
+    matchLabels: { app: shop-gateway }
+  template:
+    metadata:
+      labels: { app: shop-gateway }
+    spec:
+      terminationGracePeriodSeconds: 60
+      # 关闭 Docker link 风格的 Service 环境变量注入：namespace 内存在 Service
+      # shop-gateway，kubelet 会注入 SHOP_GATEWAY_PORT="tcp://10.96.x.x:80"，
+      # 与 application.yml 的 ${SHOP_GATEWAY_PORT:8080} 碰撞导致
+      # NumberFormatException 启动崩溃（W7 KIND_DEPLOY 实证）。容器内显式钉死
+      # 8080（K8s 形态由 Service 80 → targetPort 8080 固定）。
+      enableServiceLinks: false
+      # R-K8S 硬化（与 10-services.yaml 七个业务工作负载同款）：非 root（镜像内
+      # USER 10001:10001）、非零 fsGroup、seccomp RuntimeDefault。
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # 只读根文件系统的可写出口：/tmp、heapdump 目录、/app/logs（Nacos 客户端默认落 user.home/logs）
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: heapdump, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: shop-gateway }
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: shop-gateway }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: shop-gateway }
+      containers:
+        - name: gateway
+          image: registry.example.com/shop/shop-gateway:2.0.0
+          imagePullPolicy: IfNotPresent
+          # R-K8S 硬化：禁提权、drop ALL capabilities、只读根文件系统
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: heapdump, mountPath: /tmp/heapdump }
+            - { name: logs, mountPath: /app/logs }
+          ports:
+            - containerPort: 8080
+          lifecycle:
+            preStop:
+              exec:
+                # 先让 ingress / Service Endpoint 摘流，再让 JVM 优雅关闭在途连接
+                command: ["sh", "-c", "sleep 10"]
+          env:
+            - { name: SHOP_GATEWAY_PORT, value: "8080" }
+            # 限流令牌桶 Redis（application.yml 占位 SHOP_REDIS_HOST 默认 localhost；
+            # 不注入则网关在 Pod 内连 127.0.0.1:6379 失败，fail-closed 会把全部请求
+            # 判成 429——W7 KIND HA 实证）。键与 7 个业务工作负载同一个 ConfigMap。
+            - { name: SPRING_DATA_REDIS_HOST, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: REDIS_HOST } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_SERVER_ADDR, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_ADDR } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_NAMESPACE, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_NS } } }
+            - { name: SPRING_CLOUD_NACOS_DISCOVERY_GROUP, valueFrom: { configMapKeyRef: { name: shop-infra-config, key: NACOS_GROUP } } }
+            - { name: SHOP_JWT_SECRET, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: jwt-secret } } }
+            - { name: SHOP_INTERNAL_TOKEN, valueFrom: { secretKeyRef: { name: shop-infra-secret, key: internal-token } } }
+            - { name: SPRING_PROFILES_ACTIVE, value: "prod" }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8080 }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8080 }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8080 }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "500m", memory: 512Mi }
+            limits: { cpu: "2", memory: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-gateway
+  namespace: shop
+spec:
+  selector: { app: shop-gateway }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shop-gateway-pdb
+  namespace: shop
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: shop-gateway }

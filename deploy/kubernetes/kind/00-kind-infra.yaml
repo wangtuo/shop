@@ -1,0 +1,43 @@
+# kind 本地集群覆盖层（ConfigMap）：中间件跑在宿主机 docker compose（shop-infra），
+# kind 节点通过 host.docker.internal（Docker Desktop 宿主机网关）访问发布端口。
+# Secret 见同目录 05-kind-secret.yaml（仅缺失时创建，不做重复覆盖）。
+#
+# 与生产清单的差异（仅限本地 HA 验收，逐项显式声明）：
+#   - Nacos 注册组 shop-ha-kind，与宿主机 DEFAULT_GROUP 上的本地调试实例隔离，互不路由；
+#   - RocketMQ 端点按宿主 LAN IP 动态 patch（见 ha-check.sh）；
+#   - pay 保留 MOCK 渠道以打通支付链路：双开关 SHOP_PAY_MOCK_CHANNELS_ENABLED
+#     + SHOP_PAY_ALLOW_MOCK_UNDER_PROD 同时显式打开，且六渠道密钥全部外置为非内置值
+#     （ChannelSecretProvider prod fail-fast 的唯一豁免路径，真实生产严禁复制）；
+#   - 全部密钥使用 kind 专用开发值（均不等于代码内置默认，能通过 prod fail-fast），禁止用于生产。
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shop-infra-config
+  namespace: shop
+data:
+  NACOS_ADDR: "host.docker.internal:8848"
+  NACOS_NS: ""
+  NACOS_GROUP: "shop-ha-kind"
+  MYSQL_HOST: "host.docker.internal:3306"
+  REDIS_HOST: "host.docker.internal"
+  # RocketMQ broker 通告地址为宿主 LAN IP（三平面可达，见 deploy/rocketmq/broker.conf.tpl），
+  # Pod 初始拨号与后续 telemetry 回连都走该 IP，无需 hostAliases/DNS 改写。
+  # 该值由 ha-check.sh 按当前宿主 LAN IP 自动 patch；手动 apply 时请改为本机实际 LAN IP。
+  ROCKETMQ_ENDPOINTS: "100.81.23.64:18081"
+  SENTINEL_DASHBOARD: "host.docker.internal:8858"
+  # HA 验收豁免（双开关之一）：允许 prod profile 下保留 mock 渠道，仅限 kind 验收
+  SHOP_PAY_MOCK_CHANNELS_ENABLED: "true"
+  SHOP_PAY_ALLOW_MOCK_UNDER_PROD: "true"
+  # 压测豁免：登录防暴力破解限流默认 20 次/60s/IP（AuthController @RateLimit，
+  # 切面维度：未登录取 clientIp）。k6 从单一出口 IP 发压，第 1 秒 20 次登录后
+  # 全部 10007「登录尝试过于频繁」，属正确防护行为、非系统故障。kind 压测环境
+  # 显式抬高到 10w；生产基线（注解默认值/生产配置）保持 20 不变。正式容量验收
+  # 应在独立 perf 环境按发压 IP 池与压测账号策略规划，不得在生产关闭该限流。
+  SHOP_RATELIMIT_AUTH_LOGIN_PERMITS: "100000"
+  # 压测豁免：注册接口默认 5 次/60s/IP（防批量撞库注册）。灌入千级压测用户池时
+  # 同一出口 IP 会立刻触顶，导致 seed.sh 静默只注册成功前几十个（注册失败被 || true
+  # 吞掉，用户池实际规模与 USER_POOL 不符）。kind 压测环境抬高到 10w；生产保持 5。
+  SHOP_RATELIMIT_AUTH_REGISTER_PERMITS: "100000"
+# Docker Desktop Mac 的 kind 节点原生可解析 host.docker.internal；
+# 若在 Linux 环境验证，需要为 8 个 Deployment 补 hostAliases（192.168.65.254 或宿主机 IP）。

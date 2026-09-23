@@ -1,0 +1,64 @@
+# kind 验收专用 NetworkPolicy【强制】覆盖层（R-K8S audit-first 策略）。
+#
+# 默认【不下发】：ha-check.sh 仅当显式 ENFORCE_NETWORKPOLICY=1 时应用本文件。
+# 原因：kindnetd 不实现 NetworkPolicy（本层空操作），但安装了 Calico 等强制 CNI 的
+# kind——尤其单节点——被此覆盖层选中真实 Pod 后可能直接断联；默认路径只下发
+# 30-networkpolicy.yaml 的零选中审计标记。需要在 kind 验证真实拒绝行为时再显式开启。
+#
+# 与生产清单 30-networkpolicy.yaml 的差异：
+#   1) 本层是 enforce 形态（selector 选中真实 Pod；对应 30 文件内的注释模板 1/2）；
+#   2) kubelet 探针来源收紧为 kind 节点真实网段（ha-check 替换 __KIND_NODE_CIDR__，
+#      docker bridge 默认 172.18.0.0/16）；生产应替换为真实节点/VPC 子网或启用 CNI
+#      的 node 身份选项——绝不能在生产策略里对全世界放开探针端口。
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-services-ingress
+  namespace: shop
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: In, values: [
+          shop-user-service, shop-product-service, shop-marketing-service,
+          shop-order-service, shop-pay-service, shop-settlement-service,
+          shop-aftersale-service ] }
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: shop-gateway }
+    - from:
+        - podSelector: {}
+    - from:
+        - ipBlock: { cidr: __KIND_NODE_CIDR__ }
+      ports:
+        - { protocol: TCP, port: 8081 }
+        - { protocol: TCP, port: 8082 }
+        - { protocol: TCP, port: 8083 }
+        - { protocol: TCP, port: 8084 }
+        - { protocol: TCP, port: 8085 }
+        - { protocol: TCP, port: 8086 }
+        - { protocol: TCP, port: 8087 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-ingress
+  namespace: shop
+spec:
+  podSelector:
+    matchLabels: { app: shop-gateway }
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - ipBlock: { cidr: __KIND_NODE_CIDR__ }
+      ports:
+        - { protocol: TCP, port: 8080 }

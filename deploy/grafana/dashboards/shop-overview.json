@@ -1,0 +1,284 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 2,
+  "title": "Shop Microservices Overview",
+  "tags": ["shop", "jvm", "spring-boot"],
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "15s",
+  "templating": {
+    "list": [
+      {
+        "name": "application",
+        "type": "query",
+        "datasource": { "type": "prometheus" },
+        "query": "label_values(http_server_requests_seconds_count, application)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "QPS（按服务）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{application=~\"$application\"}[1m])) by (application)",
+          "legendFormat": "{{application}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "P95 / P99 延迟（ms）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus" },
+      "description": "histogram_quantile 基于 _bucket 直方图（应用侧 percentiles-histogram 开启后有数据）；指标单位为秒，×1000 转毫秒。",
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{application=~\"$application\"}[1m])) by (le, application)) * 1000",
+          "legendFormat": "p95 {{application}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{application=~\"$application\"}[1m])) by (le, application)) * 1000",
+          "legendFormat": "p99 {{application}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "5xx 错误率（%）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus" },
+      "description": "口径受限：全局兜底异常当前 200 化，真实 4xx/5xx 状态码修复前本面板仅统计已返回 5xx 的请求；业务异常率请见“业务异常率（code）”面板。",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{application=~\"$application\",status=~\"5..\"}[5m])) by (application)\n/ sum(rate(http_server_requests_seconds_count{application=~\"$application\"}[5m])) by (application)",
+          "legendFormat": "5xx {{application}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "热路径 URI P95（下单/回调/详情，ms）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus" },
+      "description": "_seconds 直方图 ×1000 转毫秒；依赖应用侧 percentiles-histogram 开启。",
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{application=~\"$application\",uri=~\"/api/order/.*|/api/pay/.*|/api/product/(spu|sku)/.*\"}[5m])) by (le, uri)) * 1000",
+          "legendFormat": "{{uri}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "JVM 堆内存（used/committed）",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(jvm_memory_used_bytes{application=~\"$application\",area=\"heap\"}) by (application)",
+          "legendFormat": "used {{application}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(jvm_memory_committed_bytes{application=~\"$application\",area=\"heap\"}) by (application)",
+          "legendFormat": "committed {{application}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GC 停顿频率（次/秒）",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(jvm_gc_pause_seconds_count{application=~\"$application\"}[1m])) by (action, application)",
+          "legendFormat": "{{action}} {{application}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Druid 连接池 active / wait / max",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "datasource": { "type": "prometheus" },
+      "description": "本系统数据库连接池为 Druid（原 HikariCP 面板已替换，指标随 C58 落地）。max 为池配置上限；若无独立 shop_druid_max 指标，以 Druid maxActive 配置值手工标注上限对照。",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(shop_druid_active{application=~\"$application\"}) by (application, pool)",
+          "legendFormat": "active {{application}} {{pool}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(shop_druid_wait{application=~\"$application\"}) by (application, pool)",
+          "legendFormat": "wait {{application}} {{pool}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max(shop_druid_max{application=~\"$application\"}) by (application, pool)",
+          "legendFormat": "max {{application}} {{pool}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "业务异常率（shop_biz_exception_total，按 code）",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus" },
+      "description": "应用侧业务异常计数（O6 埋点，按 code 标签区分），补充 5xx 面板在异常 200 化期间的口径缺口。",
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (application, code) (rate(shop_biz_exception_total{application=~\"$application\"}[5m]))",
+          "legendFormat": "{{application}} code={{code}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "限流命中（shop_ratelimit_hit_total）",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (application, resource) (rate(shop_ratelimit_hit_total{application=~\"$application\"}[5m]))",
+          "legendFormat": "{{application}} {{resource}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "支付 QPS",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (application) (rate(shop_pay_total{application=~\"$application\"}[5m]))",
+          "legendFormat": "pay {{application}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "支付失败率（%）",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus" },
+      "description": "shop_pay_failed_total / shop_pay_total，rate 5m，已过滤无支付流量窗口。",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (application) (rate(shop_pay_failed_total{application=~\"$application\"}[5m]))\n/ sum by (application) (rate(shop_pay_total{application=~\"$application\"}[5m]))",
+          "legendFormat": "pay-fail {{application}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "MQ 生产 / 消费 TPS",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 32 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (application) (rate(shop_mq_publish_total{application=~\"$application\"}[5m]))",
+          "legendFormat": "publish {{application}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (application, consumer_group) (rate(shop_mq_consume_total{application=~\"$application\"}[5m]))",
+          "legendFormat": "consume {{application}} {{consumer_group}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "DLQ 死信增量（5m）",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 32 },
+      "datasource": { "type": "prometheus" },
+      "description": "shop_mq_dead_letter_total 的 5m 增量；任何新增即触发 P1 告警 ShopMqDeadLetterIncreased。",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (application, topic) (increase(shop_mq_dead_letter_total{application=~\"$application\"}[5m]))",
+          "legendFormat": "DLQ {{application}} {{topic}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "MQ 消费积压（shop_mq_consume_lag）",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 40 },
+      "datasource": { "type": "prometheus" },
+      "description": "应用侧消费位点滞后；未具备时以 broker exporter rocketmq_group_diff 为环境占位。",
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "max by (application, consumer_group, topic) (shop_mq_consume_lag{application=~\"$application\"})",
+          "legendFormat": "lag {{application}} {{consumer_group}} {{topic}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox 待发堆积（pending，按 lane）",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 40 },
+      "datasource": { "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (application, lane) (shop_outbox_pending{application=~\"$application\"})",
+          "legendFormat": "pending {{application}} {{lane}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox 最老滞留年龄（s，>120 告警）",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 40 },
+      "datasource": { "type": "prometheus" },
+      "description": "fast lane pending>0 且最老年龄>120s 持续 3m 触发 P1 ShopOutboxStuck。",
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "max by (application, lane) (shop_outbox_oldest_age_seconds{application=~\"$application\"})",
+          "legendFormat": "oldest {{application}} {{lane}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

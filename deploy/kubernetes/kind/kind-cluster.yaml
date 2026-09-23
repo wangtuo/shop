@@ -1,0 +1,28 @@
+# kind 本地 HA 验收集群配置（kubectl context: kind-kind）
+#
+# 重建：deploy/kubernetes/kind/reset-kind.sh
+#
+# 说明：
+#   - extraPortMappings 把节点 80/443 直接映射到宿主机 80/443，
+#     ingress-nginx（kind 版 manifest, hostPort）可经 https://localhost 访问；
+#   - control-plane 打 ingress-ready=true 标签，满足 ingress-nginx 的 nodeSelector；
+#   - 本地验收用单节点 + preferredDuringScheduling 反亲和（应用 2 副本仍能同节点调度，
+#     pod-kill 验证副本/端点/PDB 行为）；生产多节点时反亲和自动跨主机生效。
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kind
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP

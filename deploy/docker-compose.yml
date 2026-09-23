@@ -1,0 +1,223 @@
+# 电商交易系统 V2.0 —— 本地/一体化环境基础设施编排
+# 生产部署形态见 deploy/kubernetes（K8s 多副本 + 反亲和 + PDB），本文件用于开发与功能验收。
+#
+# 组件：
+#   mysql       3306  root/root（自动创建 7 个业务库）
+#   redis       6379
+#   nacos       8848/9848  注册中心 & 配置中心（standalone；生产 ≥3 节点集群）
+#   rmq-namesrv 9876
+#   rmq-broker  8081  RocketMQ 5.x Proxy（broker + proxy 合部署 local 模式）
+#   rmq-dashboard 8090
+#   sentinel-dashboard 8858  sentinel/sentinel
+#   prometheus  9090  规则见 prometheus/rules/shop-alerts.yml（W6-2 / O2）
+#   alertmanager 9093  缺省 log-only；真实钉钉/飞书 webhook 为环境占位（W6-2 / O2）
+#   grafana     3000   admin/${GRAFANA_PASSWORD:-admin}
+#
+# 环境残留声明：mysql/redis/rocketmq/node exporter、kube-state-metrics 及真实通知 webhook
+# 均不由本 compose 部署，由目标环境提供方负责。
+name: shop-infra
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: shop-mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      - --innodb-buffer-pool-size=512M
+      # 本地一套 MySQL 同时承载：7 库 ×（宿主 8 JVM：核心 3 池×30 + 其余 4×20≈170）
+      # 与 kind 16 Pod（验收门 live-cap 每池 10≈140）两批不会同时跑，但出厂 151 在
+      # 任一形态下都会被打满（W7 K6_SMOKE 实证 Threads_connected=146、errorCode 1040
+      # Too many connections → 商品/用户服务连锁 10008/10010）。本地容器放宽到 600；
+      # 生产用云托管 MySQL，连接上限由实例规格与 RDS 配额保证（K8S §A 残留）。
+      - --max-connections=600
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - shop-mysql-data:/var/lib/mysql
+      - ./mysql/00-create-databases.sql:/docker-entrypoint-initdb.d/00-create-databases.sql:ro
+      # schema 唯一入口：10 脚本按库应用 sql/ 全量版本（V2→V6，含账本幂等），
+      # 不再单独挂载各 V2（裸 CREATE，重复执行会失败）；升级见 deploy/apply-sql.sh
+      - ./mysql/10-apply-sql.sh:/docker-entrypoint-initdb.d/10-apply-sql.sh:ro
+      # kind 验收应用账号（强口令，prod fail-fast 不用 root）；存量卷不触发，
+      # final-acceptance MIDDLEWARE 阶段会对存量 MySQL 幂等补执行。
+      - ./mysql/20-kind-app-user.sql:/docker-entrypoint-initdb.d/20-kind-app-user.sql:ro
+      - ./apply-sql.sh:/opt/shop/apply-sql.sh:ro
+      - ../sql:/opt/shop-sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2
+    container_name: shop-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - shop-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  nacos:
+    image: nacos/nacos-server:v2.4.3
+    container_name: shop-nacos
+    environment:
+      MODE: standalone
+      PREFER_HOST_MODE: hostname
+      JVM_XMS: 256m
+      JVM_XMX: 512m
+      NACOS_AUTH_ENABLE: "false"
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8848/nacos/v1/console/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  rmq-namesrv:
+    image: apache/rocketmq:5.3.1
+    container_name: shop-rmq-namesrv
+    command: sh mqnamesrv
+    environment:
+      JAVA_OPT_EXT: "-Xms256m -Xmx256m -Xmn128m"
+    ports:
+      - "9876:9876"
+    restart: unless-stopped
+
+  rmq-broker:
+    image: apache/rocketmq:5.3.1
+    container_name: shop-rmq-broker
+    # 启动时把模板中的 @BROKER_IP@ 替换为对宿主进程通告的回连地址，再启动 broker+内嵌proxy。
+    # 网络环境变化（切换 Wi-Fi/VPN/Tailscale 导致 LAN IP 漂移）时可用环境变量覆盖：
+    # SHOP_BROKER_IP=x.y.z.w docker compose up -d
+    #
+    # R4-19：root 启动仅用于 chown 新建命名卷——Docker 新建命名卷默认 root:root，
+    # 而 broker 进程是 uid 3000 的 rocketmq，直接挂载启动即
+    # FileNotFoundException: /home/rocketmq/store/lock (Permission denied) 崩溃循环
+    # （bind 时代靠 virtiofs 全权限映射未暴露此问题）。chown 后 runuser 降权，
+    # broker 本体始终以 rocketmq 身份运行；每次 force-recreate 幂等，不再需要手工 chown。
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /home/rocketmq/store
+        chown -R rocketmq:rocketmq /home/rocketmq/store
+        sed "s/@BROKER_IP@/$${SHOP_BROKER_IP}/" /home/rocketmq/conf/broker.conf.tpl > /tmp/broker.conf
+        exec runuser -u rocketmq -- sh mqbroker --enable-proxy -c /tmp/broker.conf
+    environment:
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn256m"
+      NAMESRV_ADDR: "rmq-namesrv:9876"
+      # 默认 127.0.0.1：本地形态的客户端全部是宿主进程，经 Docker 发布在 localhost
+      # 的 18081/10911 回连，与 LAN/VPN IP 漂移彻底解耦；容器间场景再显式覆盖。
+      SHOP_BROKER_IP: "${SHOP_BROKER_IP:-127.0.0.1}"
+    volumes:
+      - ./rocketmq/broker.conf.tpl:/home/rocketmq/conf/broker.conf.tpl:ro
+      # proxy 独立 JSON 配置（broker.conf 的同名键不会注入 ProxyConfig）；
+      # grpcServerPort=18081：proxy 容器内即监听 18081，对外通告端口同样为 18081
+      - ./rocketmq/rmq-proxy.json:/home/rocketmq/rocketmq-5.3.1/conf/rmq-proxy.json:ro
+      # R4-19：store 必须落在 Docker VM 内部命名卷（overlay ~59G），不能 bind 宿主目录。
+      # bind 时 broker 磁盘写门（源码硬上限 0.90）采样的是 Mac 宿主盘（virtiofs0，
+      # 460Gi/可用常年 ~45Gi，水位 90%+），开发机自身磁盘用量即可让 broker 拒写 50001，
+      # 与 MQ 负载完全无关且无法靠回收 MQ 自身数据解除（宿主数据不可删）。命名卷后
+      # 采样口径为 VM 盘（实测 ~34%），旧宿主 bind 目录 deploy/rocketmq/data 保留不删。
+      - shop-rmq-data:/home/rocketmq/store
+    ports:
+      # gRPC proxy：容器内 18081 直通宿主 18081（避让 shop-user-service 的 8081）
+      - "18081:18081"
+      - "10911:10911"
+      - "10909:10909"
+    depends_on:
+      - rmq-namesrv
+    restart: unless-stopped
+
+  rmq-dashboard:
+    image: apacherocketmq/rocketmq-dashboard:1.0.0
+    container_name: shop-rmq-dashboard
+    environment:
+      JAVA_OPTS: "-Drocketmq.namesrv.addr=rmq-namesrv:9876 -Dserver.port=8090"
+    ports:
+      - "8090:8090"
+    depends_on:
+      - rmq-namesrv
+    restart: unless-stopped
+
+  sentinel-dashboard:
+    image: bladex/sentinel-dashboard:1.8.7
+    container_name: shop-sentinel
+    # 官方镜像暂无 arm64 清单，Apple Silicon 下通过 Rosetta x86 模拟运行
+    platform: linux/amd64
+    ports:
+      - "8858:8858"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: shop-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # W6-2 / O2：告警规则只读挂载；shop-alerts.test.yml 仅供 promtool 使用，
+      # rule_files 显式指向 shop-alerts.yml，避免误加载测试文件。
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - alertmanager
+    restart: unless-stopped
+
+  # W6-2 / O2：本地形态不挂持久卷（告警状态可丢失，AM 重启后由 Prometheus 重建）；
+  # 生产形态的 Alertmanager 集群/持久化由部署环境提供方负责（环境残留）。
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: shop-alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./prometheus/alertmanager:/etc/alertmanager:ro
+    ports:
+      - "9093:9093"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: shop-grafana
+    environment:
+      # W6-2 / O2（审计建议项 15）：口令可经 GRAFANA_PASSWORD 注入，未设置保持现状默认 admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - shop-grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  shop-mysql-data:
+  shop-redis-data:
+  shop-grafana-data:
+  # R4-19：RocketMQ broker store 命名卷（落 Docker VM overlay 盘，非 Mac 宿主盘）。
+  # 与上面三个数据卷同级，docker 回收时禁止删除（店内消息存储）。
+  shop-rmq-data:

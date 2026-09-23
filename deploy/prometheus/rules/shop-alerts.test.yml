@@ -1,0 +1,89 @@
+# promtool 规则测试（W6-2 / O2）
+# 运行：
+#   promtool test rules shop-alerts.test.yml
+# 或（无本地 promtool）：
+#   docker run --rm -v "$PWD:/p" prom/prometheus:v2.52.0 \
+#     promtool test rules /p/shop-alerts.test.yml
+#
+# 覆盖：服务宕机 Pending->Firing->恢复清除；5xx 率触发；outbox 滞留触发。
+
+rule_files:
+  - shop-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      # 1) shop-gateway 抓取失败 4 个点后恢复：t0..t4 up=0，t5/t6 up=1
+      - series: 'up{job="shop-gateway",instance="host.docker.internal:8080"}'
+        values: '0 0 0 0 0 1 1'
+
+      # 2) shop-order-service 5xx 率 3%（5xx 3/100，窗口 5m）
+      - series: 'http_server_requests_seconds_count{application="shop-order-service",method="GET",status="200",uri="/api/order/detail"}'
+        values: '0 100 200 300 400 500 600'
+      - series: 'http_server_requests_seconds_count{application="shop-order-service",method="GET",status="500",uri="/api/order/detail"}'
+        values: '0 3 6 9 12 15 18'
+
+      # 3) outbox fast lane 滞留：pending=5，最老年龄 200s（>120s）
+      - series: 'shop_outbox_pending{application="shop-order-service",lane="fast"}'
+        values: '5 5 5 5 5'
+      - series: 'shop_outbox_oldest_age_seconds{application="shop-order-service",lane="fast"}'
+        values: '200 200 200 200 200'
+
+    alert_rule_test:
+      # --- ShopServiceDown：for 2m，1m 时 Pending（无告警），3m 时 Firing，恢复后 6m 清除 ---
+      - eval_time: 1m
+        alertname: ShopServiceDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ShopServiceDown
+        exp_alerts:
+          - exp_labels:
+              alertname: ShopServiceDown
+              instance: host.docker.internal:8080
+              job: shop-gateway
+              severity: P1
+              team: shop-platform
+            exp_annotations:
+              summary: "服务宕机：shop-gateway（host.docker.internal:8080）"
+              description: "prometheus 连续 2m 抓取失败，job=shop-gateway instance=host.docker.internal:8080。检查进程/健康检查/网络与注册中心摘除情况。"
+              runbook_url: "https://runbooks.shop.internal/o2/ShopServiceDown"
+      - eval_time: 6m
+        alertname: ShopServiceDown
+        exp_alerts: []
+
+      # --- ShopHttp5xxRateHigh：for 5m，1m 时 Pending，6m 时 Firing ---
+      - eval_time: 1m
+        alertname: ShopHttp5xxRateHigh
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ShopHttp5xxRateHigh
+        exp_alerts:
+          - exp_labels:
+              alertname: ShopHttp5xxRateHigh
+              application: shop-order-service
+              severity: P1
+              team: shop-platform
+            exp_annotations:
+              summary: "5xx 率超 2%：shop-order-service（2.913%）"
+              description: "shop-order-service 5xx 占比连续 5m 高于 2%。依赖全局异常处理器返回真实状态码；兜底异常 200 化期间口径受限，需结合业务异常率面板共同判断。"
+              runbook_url: "https://runbooks.shop.internal/o2/ShopHttp5xxRateHigh"
+
+      # --- ShopOutboxStuck：for 3m，1m 时 Pending，4m 时 Firing ---
+      - eval_time: 1m
+        alertname: ShopOutboxStuck
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ShopOutboxStuck
+        exp_alerts:
+          - exp_labels:
+              alertname: ShopOutboxStuck
+              application: shop-order-service
+              lane: fast
+              severity: P1
+              team: shop-middleware
+            exp_annotations:
+              summary: "Outbox 快速通道卡死：shop-order-service（pending=5，最老 >120s）"
+              description: "shop-order-service fast lane 存在 status=0 且 deliver_at<=NOW() 的滞留记录，且最老记录年龄连续 3m 超过 120s。检查 outbox relay 与 MQ 连接，防止本地消息表死信。"
+              runbook_url: "https://runbooks.shop.internal/o2/ShopOutboxStuck"

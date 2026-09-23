@@ -1,0 +1,17 @@
+NAME                                      READY   STATUS    RESTARTS   AGE
+shop-aftersale-service-5cd9b4869b-bdqks   0/1     Pending   0          14m
+shop-aftersale-service-5cd9b4869b-gg59f   1/1     Running   0          14m
+shop-gateway-6f8976dbdf-h9b2k             0/1     Pending   0          14m
+shop-gateway-6f8976dbdf-wq48p             1/1     Running   0          14m
+shop-marketing-service-66bd747775-cmjg4   0/1     Pending   0          14m
+shop-marketing-service-66bd747775-h4txw   1/1     Running   0          14m
+shop-order-service-85b997787d-c6hrq       1/1     Running   0          14m
+shop-order-service-85b997787d-jgvqb       0/1     Pending   0          14m
+shop-pay-service-569dffd8cb-d4l8x         1/1     Running   0          14m
+shop-pay-service-569dffd8cb-xw7k8         0/1     Pending   0          14m
+shop-product-service-7d66f9b476-br4d7     1/1     Running   0          14m
+shop-product-service-7d66f9b476-x78hd     0/1     Pending   0          14m
+shop-settlement-service-8f47869b8-j7lt5   1/1     Running   0          14m
+shop-settlement-service-8f47869b8-w24fm   0/1     Pending   0          14m
+shop-user-service-64bc7bdd57-bwk2z        1/1     Running   0          14m
+shop-user-service-64bc7bdd57-knrlz        0/1     Pending   0          14m

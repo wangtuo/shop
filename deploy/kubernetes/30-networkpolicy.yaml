@@ -1,0 +1,193 @@
+# NetworkPolicy（R-K8S：先 audit / 只记录，不硬阻断，避免 kind 单节点装强制 CNI 后断联）
+#
+# 为什么默认策略不选中 Pod：
+#   原生 networking.k8s.io/v1 NetworkPolicy 没有 audit 模式——只要 policy 选中某 Pod，
+#   规则立即强制。kind 默认 CNI（kindnetd）不实现策略，下发为空操作；但为兼容装了
+#   Calico/其他强制 CNI 的 kind（含单节点）与直接复用本文件的生产集群，本文件【唯二
+#   生效对象】只选择不存在的标签 np-audit=true，选中数恒为 0：等同只记录意图、零阻断。
+#
+# 强制策略升级路径（W7 通过后由总控执行）：
+#   1) 在【多节点 + 强制 CNI】集群跑通 ha-check.sh 全绿与 deploy/loadtest/chaos.sh；
+#   2) 解开本文件后半部注释模板（或把 audit selector 换成真实 app 标签）灰度，
+#      先 Ingress 后 default-deny + Egress，逐条对照连接被拒日志收敛白名单；
+#   3) kind 上验证强制行为：ENFORCE_NETWORKPOLICY=1 bash ha-check.sh
+#      （额外下发 kind/40-kind-networkpolicy.yaml 覆盖层；单节点 + 强制 CNI 可能断联，
+#      默认关闭）。
+#
+# §A 残留（托管中间件落地前禁止启用 egress 默认拒绝）：
+#   中间件地址经 shop-infra-config 注入（MYSQL_HOST / REDIS_HOST /
+#   ROCKETMQ_ENDPOINTS / NACOS_ADDR），生产位于 shop-infra 命名空间或托管 VPC。
+#   下方 egress 模板里的命名空间标签、ipBlock CIDR、TLS 端口均为占位，必须按真实
+#   拓扑替换并验证后才能放开强制。
+---
+# ============ 生效对象：零选中审计标记（任何 CNI 下均无阻断效果） ============
+# 期望的「业务入站」策略占位：正式规则见文末模板 audit→enforce 第 1 步。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: audit-backend-ingress
+  namespace: shop
+  annotations:
+    shop.network/audit: "record-only"
+spec:
+  podSelector:
+    matchLabels: { np-audit: "true" }   # 无 Pod 携带：选中数=0，等同仅记录意图
+  policyTypes:
+    - Ingress
+  ingress: []
+---
+# 期望的「默认拒绝入站+出站」策略占位：与白名单配套，禁止单独先于白名单启用。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: audit-default-deny-all
+  namespace: shop
+  annotations:
+    shop.network/audit: "record-only"
+spec:
+  podSelector:
+    matchLabels: { np-audit: "true" }
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+# ============================================================================
+# 以下为强制策略模板（audit→enforce），全部注释；逐段解开，勿一次性全开。
+# ============================================================================
+#
+# ---- 模板 1：业务服务入站（网关 + 同命名空间 + 节点私网探针，仅 actuator 端口）----
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: backend-services-ingress
+#   namespace: shop
+# spec:
+#   podSelector:
+#     matchExpressions:
+#       - { key: app, operator: In, values: [
+#           shop-user-service, shop-product-service, shop-marketing-service,
+#           shop-order-service, shop-pay-service, shop-settlement-service,
+#           shop-aftersale-service ] }
+#   policyTypes:
+#     - Ingress
+#   ingress:
+#     # 来自网关的外部流量
+#     - from:
+#         - podSelector:
+#             matchLabels: { app: shop-gateway }
+#     # 同命名空间内部调用（Feign /inner/**，另有 X-Internal-Token 校验）
+#     - from:
+#         - podSelector: {}
+#     # 节点探针/Prometheus 抓取：仅 RFC1918，且只暴露 actuator/业务同端口
+#     # 若节点地址落在公网网段或需限定具体 VPC 子网，收窄为真实节点网段
+#     - from:
+#         - ipBlock: { cidr: 10.0.0.0/8 }
+#         - ipBlock: { cidr: 172.16.0.0/12 }
+#         - ipBlock: { cidr: 192.168.0.0/16 }
+#       ports:
+#         - { protocol: TCP, port: 8081 }
+#         - { protocol: TCP, port: 8082 }
+#         - { protocol: TCP, port: 8083 }
+#         - { protocol: TCP, port: 8084 }
+#         - { protocol: TCP, port: 8085 }
+#         - { protocol: TCP, port: 8086 }
+#         - { protocol: TCP, port: 8087 }
+#
+# ---- 模板 2：网关入站（仅 Ingress Controller + 同命名空间 + 私网探针）----
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: gateway-ingress
+#   namespace: shop
+# spec:
+#   podSelector:
+#     matchLabels: { app: shop-gateway }
+#   policyTypes:
+#     - Ingress
+#   ingress:
+#     # ingress-nginx 所在命名空间（按实际标签调整）
+#     - from:
+#         - namespaceSelector:
+#             matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+#       ports:
+#         - { protocol: TCP, port: 8080 }
+#     - from:
+#         - podSelector: {}
+#       ports:
+#         - { protocol: TCP, port: 8080 }
+#     - from:
+#         - ipBlock: { cidr: 10.0.0.0/8 }
+#         - ipBlock: { cidr: 172.16.0.0/12 }
+#         - ipBlock: { cidr: 192.168.0.0/16 }
+#       ports:
+#         - { protocol: TCP, port: 8080 }
+#
+# ---- 模板 3：命名空间默认拒绝（入站+出站），须与模板 4 白名单同批放开 ----
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: default-deny-all
+#   namespace: shop
+# spec:
+#   podSelector: {}
+#   policyTypes:
+#     - Ingress
+#     - Egress
+#
+# ---- 模板 4：出站白名单（与模板 3 同批；§A 占位必须按真实拓扑替换）----
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: egress-required-only
+#   namespace: shop
+# spec:
+#   podSelector: {}
+#   policyTypes:
+#     - Egress
+#   egress:
+#     # 同命名空间：8 个工作负载业务/actuator 端口
+#     - to:
+#         - podSelector: {}
+#       ports:
+#         - { protocol: TCP, port: 8080 }
+#         - { protocol: TCP, port: 8081 }
+#         - { protocol: TCP, port: 8082 }
+#         - { protocol: TCP, port: 8083 }
+#         - { protocol: TCP, port: 8084 }
+#         - { protocol: TCP, port: 8085 }
+#         - { protocol: TCP, port: 8086 }
+#         - { protocol: TCP, port: 8087 }
+#     # DNS：kube-dns/CoreDNS（按集群标签核对；端口协议必须含 UDP）
+#     - to:
+#         - namespaceSelector:
+#             matchLabels: { kubernetes.io/metadata.name: kube-system }
+#           podSelector:
+#             matchLabels: { k8s-app: kube-dns }
+#       ports:
+#         - { protocol: UDP, port: 53 }
+#         - { protocol: TCP, port: 53 }
+#     # §A 中间件占位（shop-infra 命名空间或托管 VPC；标签/CIDR/端口待 W1-D/托管落地替换）：
+#     #   MySQL 3306（useSSL 翻转后为 TLS）
+#     # - to:
+#     #     - namespaceSelector:
+#     #         matchLabels: { kubernetes.io/metadata.name: shop-infra }
+#     #   ports:
+#     #     - { protocol: TCP, port: 3306 }
+#     #   Redis 6379（集群总线还需 16379；托管集群通常 TLS 6379）
+#     # - to: [ { namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: shop-infra } } } ]
+#     #   ports:
+#     #     - { protocol: TCP, port: 6379 }
+#     #     - { protocol: TCP, port: 16379 }
+#     #   RocketMQ proxy/nameserver 8081（ha-check kind 走宿主 18081）
+#     # - to: [ { namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: shop-infra } } } ]
+#     #   ports:
+#     #     - { protocol: TCP, port: 8081 }
+#     #     - { protocol: TCP, port: 9876 }
+#     #   Nacos 8848/9848（gRPC）
+#     # - to: [ { namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: shop-infra } } } ]
+#     #   ports:
+#     #     - { protocol: TCP, port: 8848 }
+#     #     - { protocol: TCP, port: 9848 }
+#     # 若中间件在 VPC（非集群内），改用 ipBlock 并逐条 /16 收窄，禁止 0.0.0.0/0：
+#     # - to: [ { ipBlock: { cidr: 10.0.0.0/16 } } ]   # §A 占位，待真实 VPC 子网替换
