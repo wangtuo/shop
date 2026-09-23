@@ -98,6 +98,12 @@ public class OrderDTO implements Serializable {
     /** 发货时间 */
     private LocalDateTime shipTime;
 
+    /** 承运物流公司 */
+    private String logisticsCompany;
+
+    /** 物流运单号 */
+    private String logisticsNo;
+
     /** 确认收货时间（评价 15 天窗口等以此为起点） */
     private LocalDateTime confirmTime;
 

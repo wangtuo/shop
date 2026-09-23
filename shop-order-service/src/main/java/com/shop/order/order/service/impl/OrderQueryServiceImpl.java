@@ -101,7 +101,23 @@ public class OrderQueryServiceImpl implements OrderQueryService {
     private PageResult<OrderDTO> page(LambdaQueryWrapper<Order> wrapper, OrderPageQuery query) {
         Page<Order> page = new Page<>(query.safePageNum(), query.safePageSize());
         Page<Order> result = orderMapper.selectPage(page, wrapper);
-        List<OrderDTO> list = result.getRecords().stream().map(this::toListDTO).toList();
+        List<Order> orders = result.getRecords();
+        // 批量带出商品行，避免列表卡片缺商品（一次 IN 查询）
+        Map<String, List<OrderItem>> itemMap = new LinkedHashMap<>();
+        if (!orders.isEmpty()) {
+            List<String> nos = orders.stream().map(Order::getOrderNo).toList();
+            List<OrderItem> rows = orderItemMapper.selectList(new LambdaQueryWrapper<OrderItem>()
+                    .in(OrderItem::getOrderNo, nos)
+                    .orderByAsc(OrderItem::getId));
+            for (OrderItem it : rows) {
+                itemMap.computeIfAbsent(it.getOrderNo(), k -> new java.util.ArrayList<>()).add(it);
+            }
+        }
+        List<OrderDTO> list = orders.stream().map(order -> {
+            OrderInvoice invoice = invoiceMapper.selectOne(new LambdaQueryWrapper<OrderInvoice>()
+                    .eq(OrderInvoice::getOrderNo, order.getOrderNo()));
+            return assembler.toDTO(order, itemMap.getOrDefault(order.getOrderNo(), List.of()), invoice);
+        }).toList();
         return PageResult.of(query.safePageNum(), query.safePageSize(), result.getTotal(), list);
     }
 
@@ -125,9 +141,4 @@ public class OrderQueryServiceImpl implements OrderQueryService {
     }
 
     /** 列表行不含明细，减少批量查询开销 */
-    private OrderDTO toListDTO(Order order) {
-        OrderInvoice invoice = invoiceMapper.selectOne(new LambdaQueryWrapper<OrderInvoice>()
-                .eq(OrderInvoice::getOrderNo, order.getOrderNo()));
-        return assembler.toDTO(order, List.of(), invoice);
-    }
 }

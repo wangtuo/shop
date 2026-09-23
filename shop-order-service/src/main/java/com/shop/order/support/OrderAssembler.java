@@ -42,6 +42,8 @@ public class OrderAssembler {
                 .payTransactionNo(o.getPayTransactionNo())
                 .payTime(o.getPayTime())
                 .shipTime(o.getShipTime())
+                .logisticsCompany(o.getLogisticsCompany())
+                .logisticsNo(o.getLogisticsNo())
                 .confirmTime(o.getConfirmTime())
                 .completeTime(o.getCompleteTime())
                 .remark(o.getRemark())

@@ -1,0 +1,18 @@
+# Shop WebUI —— 买家端 PC 站（零构建原生 ES Module SPA，参考淘宝 PC 站）
+# 启动：docker compose -f webui/docker-compose.yml up -d
+# 访问：http://localhost:8000
+#
+# 网关 JVM 运行在宿主机:8080；容器通过 host.docker.internal 回连（Docker Desktop Mac/Win）。
+# Linux 宿主机请把 host.docker.internal 换为宿主机 IP，或在 compose 的 extra_hosts 中映射。
+services:
+  webui:
+    image: nginx:1.27-alpine
+    container_name: shop-webui
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
