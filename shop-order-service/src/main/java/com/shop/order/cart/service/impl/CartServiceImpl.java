@@ -258,6 +258,7 @@ public class CartServiceImpl implements CartService {
         int totalQty = 0;
         int invalidCount = 0;
         long selectedAmount = 0L;
+        int selectedQtyTotal = 0;
         boolean allSelected = true;
         int selectableCount = 0;
         for (Map.Entry<Long, List<CartItemVO>> e : byShop.entrySet()) {
@@ -279,6 +280,7 @@ public class CartServiceImpl implements CartService {
                 if (vo.getSelected() != null && vo.getSelected() == 1) {
                     selectedCount++;
                     selectedQty += vo.getQty();
+                    selectedQtyTotal += vo.getQty();
                     groupAmount += vo.getCurrentPriceFen() * vo.getQty();
                 } else {
                     groupAll = false;
@@ -305,6 +307,7 @@ public class CartServiceImpl implements CartService {
                 .shopGroups(groups)
                 .totalCount(voList.size())
                 .totalQty(totalQty)
+                .selectedQty(selectedQtyTotal)
                 .invalidCount(invalidCount)
                 .allSelected(allSelected)
                 .selectedAmountFen(selectedAmount)

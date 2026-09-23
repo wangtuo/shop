@@ -19,6 +19,8 @@ public class CartViewVO implements Serializable {
     private Integer totalCount;
     /** 商品总件数（数量合计） */
     private Integer totalQty;
+    /** 勾选商品件数（数量合计） */
+    private Integer selectedQty;
     /** 失效商品条目数 */
     private Integer invalidCount;
     /** 是否全选 */

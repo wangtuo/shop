@@ -36,6 +36,10 @@ export SHOP_INTERNAL_TOKEN=dev-local-only-internal-token
 export SHOP_RATELIMIT_AUTH_REGISTER_PERMITS=1000
 export SHOP_RATELIMIT_AUTH_LOGIN_PERMITS=1000
 
+# 本地形态全部进程同机、按端口区分；固定 Nacos 注册 IP 为回环，避免 Spring InetUtils
+# 选中 Tailscale/UTM 等临时网卡地址（网卡消失后网关 lb 长连超时、全链路 503/10008）。
+export SPRING_CLOUD_NACOS_DISCOVERY_IP=127.0.0.1
+
 if [ "${1:-}" != "--skip-build" ]; then
   echo "== 全量构建 =="
   mvn -q -DskipTests clean package || { echo "构建失败"; exit 1; }
