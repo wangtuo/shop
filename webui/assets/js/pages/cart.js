@@ -38,7 +38,7 @@ export async function renderCart({ el }) {
         <div class="cart-shop">
           <div class="shop-head">
             <label class="row gap-8"><span class="cart-check ${g.allSelected ? 'on' : ''}" data-shop-sel="${gi}">${g.allSelected ? '✓' : ''}</span><b>🏬 店铺 #${g.shopId}</b></label>
-            <span class="muted tiny" style="margin-left:14px">已选 ${g.selectedCount || 0} 件</span>
+            <span class="muted tiny" style="margin-left:14px">已选 ${g.selectedCount || 0} 种${(g.selectedQty || 0) !== (g.selectedCount || 0) ? ` ${g.selectedQty || 0} 件` : ''}</span>
           </div>
           ${g.items.filter((it) => !it.invalid).map((it) => itemHtml(it)).join('')}
         </div>`).join('')}</div>
